@@ -10,7 +10,7 @@
 
 import { short } from './draw.js'
 import {
-  ago, changedFiles, ciWord, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
+  STATUS_MARK, ago, changedFiles, ciWord, herdrPanes, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
 } from './work.js'
 
 export const TABS = [
@@ -38,6 +38,7 @@ export const W = {
   firstPrompt: '',
   touched: [],       // files Claude wrote this session, newest last, absolute
   fetched: {},       // base branch -> when origin's copy was last fetched
+  herdr: null,       // { bin, workspace, pane, tab, label, panes, at, error }: the tab's live panes
   busy: { git: false, gh: false, overall: false },
   ghDueAt: 0,
   gitDueAt: 0,
@@ -309,6 +310,7 @@ async function writeChain($, fields) {
     id: W.sessionId,
     root,
     ...(W.repo ? { repo: W.repo } : {}),
+    ...(W.herdr?.pane ? { pane: W.herdr.pane } : {}),
     lastAt: now,
     ...(W.git?.branch ? { branch: W.git.branch } : {}),
     ...(W.firstPrompt ? { firstPrompt: short(W.firstPrompt, 200) } : {}),
@@ -353,6 +355,48 @@ export async function refreshOverall($) {
   } finally {
     W.busy.overall = false
   }
+}
+
+// herdr: the panes of this tab that run an agent, and which session each holds
+export async function refreshHerdr($) {
+  if (W.herdr === null) {
+    if ((await $.env.get('HERDR_ENV')) !== '1') {
+      W.herdr = { off: true }
+      return
+    }
+    W.herdr = {
+      bin: (await $.env.get('HERDR_BIN_PATH')) || 'herdr',
+      workspace: await $.env.get('HERDR_WORKSPACE_ID'),
+      pane: await $.env.get('HERDR_PANE_ID'),
+      tab: await $.env.get('HERDR_TAB_ID'),
+      panes: [],
+    }
+  }
+  const h = W.herdr
+  if (h.off || !h.tab) return
+  try {
+    const [panes, tab] = await Promise.all([
+      $.process.run([h.bin, 'pane', 'list', ...(h.workspace ? ['--workspace', h.workspace] : [])], { timeoutMs: 5000 }),
+      $.process.run([h.bin, 'tab', 'get', h.tab], { timeoutMs: 5000 }),
+    ])
+    if (panes.exitCode !== 0) throw new Error(panes.stderr.trim().split('\n')[0] || `exit ${panes.exitCode}`)
+    h.panes = herdrPanes(panes.stdout, h.tab)
+    try {
+      h.label = JSON.parse(tab.stdout)?.result?.tab?.label || ''
+    } catch {}
+    h.at = await $.clock.now()
+    h.error = null
+  } catch (err) {
+    h.error = 'herdr: ' + err.message
+  }
+}
+
+// Jump to a pane: herdr focuses its tab and the pane, and marks it seen
+export async function focusPane($, pane) {
+  const h = W.herdr
+  if (!h?.bin) return 'herdr is not running here'
+  const r = await $.process.run([h.bin, 'agent', 'focus', pane], { timeoutMs: 5000 })
+  return r.exitCode === 0 ? null : (r.stderr.trim().split('\n')[0] || `exit ${r.exitCode}`)
 }
 
 export async function readContext($) {
@@ -540,36 +584,67 @@ export function githubItems(w, act, now) {
 export function chatItems(w, act, now) {
   const out = []
   const add = (text, style = {}) => out.push({ text, ...style })
-  const c = W.chain
-  const where = W.tabId ? W.tabId : 'this folder'
-  add(spread('◆ CHATS IN THIS TAB', c ? `${c.sessions.length} chat${c.sessions.length === 1 ? '' : 's'} · ${where}` : '', w), { bold: true, color: 'magenta' })
-  if (!c) return [...out, { text: 'reading…', dim: true }]
-  if (!c.sessions.length) add('No chats recorded in this tab yet: this one is added at the end of its first turn.', { dim: true, wrap: true })
+  const c = W.chain || { sessions: [] }
+  const h = W.herdr
+  const live = h?.panes || []
+  const rowOf = id => c.sessions.find(s => s.id === id)
+  const name = h?.tab ? `${h.label ? `"${h.label}"` : h.tab}` : W.tabId || 'this folder'
+  const count = live.length ? `${live.length} pane${live.length === 1 ? '' : 's'}` : `${c.sessions.length} chat${c.sessions.length === 1 ? '' : 's'}`
+  add(spread('◆ CHATS IN THIS TAB', `${name} · ${count}`, w), { bold: true, color: 'magenta' })
   if (c.overall) add('Overall: ' + c.overall, { wrap: true })
   else if (c.sessions.length > 1 && W.busy.overall) add('… summarizing the chain', { dim: true })
-  add('')
-  const list = [...c.sessions].reverse()
-  list.forEach((s, j) => {
-    const n = c.sessions.length - j
-    const isNow = s.id === W.sessionId
-    const span = `${clock(s.startedAt)}${s.lastAt && s.lastAt - s.startedAt > 60000 ? '–' + clock(s.lastAt).split(' ')[1] : ''}`
+  if (h?.error) add(h.error, { color: 'red' })
+
+  // What a recorded chat says about itself, under its row
+  const details = (s, isNow) => {
+    if (!s) return
     const facts = [
-      span,
       s.turns ? `${s.turns} turns` : '',
       s.ctx != null ? `ctx ${s.ctx}%` : '',
-      s.ended ? `ended (${s.ended})` : isNow ? 'now' : `${ago(s.lastAt, now)} ago`,
+      s.branch ? `⎇ ${s.branch}` : '',
+      s.ended ? `ended (${s.ended})` : '',
     ].filter(Boolean).join(' · ')
-    add(short(`${isNow ? '▶' : ' '} ${n}. ${s.id.slice(0, 8)}  ${facts}`, w), { bold: isNow, color: isNow ? 'magenta' : undefined })
     if (s.from) {
       const k = c.sessions.findIndex(x => x.id === s.from)
-      add(`    ↳ from ${k >= 0 ? `chat ${k + 1}'s handoff note` : 'a handoff'}`, { dim: true })
+      add(`    ↳ from ${k >= 0 ? `chat ${s.from.slice(0, 8)}'s handoff note` : 'a handoff'}`, { dim: true })
     }
     const what = s.summary || (s.firstPrompt ? 'started with: ' + s.firstPrompt : '')
     if (what) add('    ' + what, { wrap: true, dim: !isNow })
-    if (s.branch) add(`    ⎇ ${s.branch}${s.title ? ' · ' + s.title : ''}`, { dim: true })
-    if (!isNow) out.push({ buttons: [{ key: 'resume:' + s.id, label: 'copy resume command', onPress: () => act?.copy(`claude --resume ${s.id}`) }], indent: 4 })
+    if (facts) add('    ' + facts, { dim: true })
+  }
+
+  // The tab's panes as herdr has them: a number jumps to one
+  if (live.length) {
     add('')
-  })
+    add('Live in herdr, newest first · a number jumps to that pane', { dim: true })
+    live.forEach((p, i) => {
+      const isNow = p.pane === h.pane
+      const mark = STATUS_MARK[p.status] || '?'
+      const label = `${i < 9 ? '' : '   '}${mark} ${p.status.padEnd(7)} ${short(p.title || p.agent, Math.max(10, w - 26))}${isNow ? '  ◀ here' : ''}`
+      out.push({ buttons: [{
+        key: 'pane:' + p.pane, ...(i < 9 ? { hotkey: String(i + 1) } : {}), plain: true, label,
+        onPress: () => act?.focusPane(p.pane),
+      }] })
+      details(p.session && rowOf(p.session), isNow)
+    })
+  } else if (!c.sessions.length) {
+    add('No chats recorded in this tab yet: this one is added at the end of its first turn.', { dim: true, wrap: true })
+  }
+
+  // Chats the tab held that no pane holds now
+  const gone = [...c.sessions].reverse().filter(s => !live.some(p => p.session === s.id))
+  if (gone.length) {
+    add('')
+    add(live.length ? 'Earlier chats, no longer in a pane' : 'Chats in this tab, newest first', { dim: true })
+    for (const s of gone) {
+      const isNow = s.id === W.sessionId
+      add(short(`${isNow ? '▶' : ' '} ${s.id.slice(0, 8)}  ${clock(s.startedAt)} · ${isNow ? 'now' : `${ago(s.lastAt, now)} ago`}`, w), { bold: isNow })
+      details(s, isNow)
+      if (!isNow) out.push({ buttons: [{ key: 'resume:' + s.id, label: 'copy resume command', onPress: () => act?.copy(`claude --resume ${s.id}`) }], indent: 4 })
+    }
+  }
+  add('')
+  add('● working  ! needs you  ✓ finished, unseen  ○ idle', { dim: true })
   if (W.ctx !== null && W.ctx >= 80) add(`Context is ${W.ctx}% full: time to hand off soon.`, { color: 'yellow' })
   return out
 }

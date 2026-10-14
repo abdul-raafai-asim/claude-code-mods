@@ -231,6 +231,32 @@ export function handoffFrom(texts, sessions) {
   return /\bhand-?off\b/i.test(all) ? 'unknown' : null
 }
 
+// `herdr pane list` JSON -> the agent panes of one tab, newest first. herdr's
+// ids count up in base 36 (`wJ:p1F` after `wJ:pZ`), so the order is the order
+// the panes were made: a handoff's new pane comes after the one it left.
+export function herdrPanes(json, tabId) {
+  let panes
+  try {
+    panes = (typeof json === 'string' ? JSON.parse(json) : json)?.result?.panes || []
+  } catch {
+    return []
+  }
+  const order = id => parseInt(String(id).split(':p')[1] || '0', 36) || 0
+  return panes
+    .filter(p => p.tab_id === tabId && p.agent)
+    .map(p => ({
+      pane: p.pane_id,
+      agent: p.agent,
+      status: p.agent_status || 'unknown',
+      session: p.agent_session?.value || null,
+      title: p.terminal_title_stripped || p.terminal_title || '',
+      focused: Boolean(p.focused),
+    }))
+    .sort((a, b) => order(b.pane) - order(a.pane))
+}
+
+export const STATUS_MARK = { working: '●', blocked: '!', done: '✓', idle: '○', unknown: '?' }
+
 // ---------------------------------------------------------------------------
 // Small words
 // ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@
 import { findDiagrams, parseMermaid, drawGraph, short } from './draw.js'
 import { adoptIds, allIds, applyOps, boxOf, carrySubs, cleanId, levelAt, setLevel, toMermaid, uniqueIds } from './graph.js'
 import {
-  DIFF_MODES, TABS, W, plain, chatItems, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
+  DIFF_MODES, TABS, W, plain, chatItems, focusPane, refreshHerdr, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
   startPanelSession, updateChain,
 } from './panel.js'
 
@@ -513,6 +513,10 @@ function actions($) {
         $.ui.toast('No `code` command: in VS Code run "Shell Command: Install \'code\' command in PATH"')
       }
     },
+    focusPane: async pane => {
+      const err = await focusPane($, pane).catch(e => e.message)
+      if (err) $.ui.toast('Could not jump to that pane: ' + err)
+    },
     copy: async text => {
       const r = await $.ui.copy({ text })
       $.ui.toast(r.isCopied ? 'Copied: ' + text : 'Could not copy: ' + text)
@@ -935,6 +939,7 @@ async function tick($, force = false) {
     await refreshGit($)
   }
   if ((force && W.tab === 'github') || now >= W.ghDueAt) await refreshGh($)
+  if (W.herdr === null || W.tab === 'chats') await refreshHerdr($)
   if (force && W.tab === 'chats') await updateChain($, { turns: S.turn })
   await redraw($)
 }

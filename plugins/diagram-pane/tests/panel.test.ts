@@ -83,9 +83,17 @@ const PR = {
   ],
 }
 
-function world(on: any) {
+let focused: string[] = []
+const PANES = { result: { panes: [
+  { pane_id: 'wK:p1', tab_id: 'wK:t1', agent: 'claude', agent_status: 'working', agent_session: { value: 'sess-0001-aaaa' }, terminal_title_stripped: 'Discounts' },
+  { pane_id: 'wK:p1F', tab_id: 'wK:t1', agent: 'claude', agent_status: 'done', agent_session: { value: 'other-9' }, terminal_title_stripped: 'Payment posting handoff' },
+  { pane_id: 'wK:p2', tab_id: 'wK:t2', agent: 'claude', agent_status: 'idle', agent_session: { value: 'x' }, terminal_title_stripped: 'Elsewhere' },
+] } }
+
+function world(on: any, env: Record<string, string> = { HERDR_TAB_ID: 'wK:t1' }) {
+  focused = []
   mock.store(on)
-  mock.env(on, { HERDR_TAB_ID: 'wK:t1' })
+  mock.env(on, env)
   mock.clock(on)
   on('session.id', () => ({ value: 'sess-0001-aaaa' }))
   on('session.cwd', () => ({ value: '/repo' }))
@@ -118,6 +126,9 @@ function world(on: any) {
     if (a.startsWith('git rev-list')) return ok('0\t3\n')
     if (a.startsWith('gh pr view')) return ok(JSON.stringify(PR))
     if (a.startsWith('gh run list')) return ok('[]')
+    if (a.startsWith('/bin/herdr pane list')) return ok(JSON.stringify(PANES))
+    if (a.startsWith('/bin/herdr tab get')) return ok(JSON.stringify({ result: { tab: { label: 'runway' } } }))
+    if (a.startsWith('/bin/herdr agent focus')) return (focused.push(e.argv[3]), ok('{}'))
     return no('unexpected: ' + a)
   })
 }
@@ -161,14 +172,18 @@ test('the github tab shows the PR, its review and the failing check', async ($, 
   await has(ui, /✗ test/)
 })
 
-test('the chats tab records this session under the terminal tab', async ($, on) => {
-  world(on)
+test('the chats tab lists the tab\'s herdr panes, and a number jumps to one', async ($, on) => {
+  world(on, { HERDR_ENV: '1', HERDR_TAB_ID: 'wK:t1', HERDR_PANE_ID: 'wK:p1', HERDR_WORKSPACE_ID: 'wK', HERDR_BIN_PATH: '/bin/herdr' })
   const ui = await mount($)
   await ui.press({ key: 'tab:chats' } as never)
   await has(ui, /CHATS IN THIS TAB/)
-  await has(ui, /1 chat · herdr:wK:t1/)
-  await has(ui, /▶ 1\. sess-000/)
+  await has(ui, /"runway" · 2 panes/)
+  // Newest pane first: p1F counts after pZ in base 36
+  expect((await ui.find({ key: 'pane:wK:p1F' } as never))?.text).toContain('Payment posting handoff')
+  expect((await ui.find({ key: 'pane:wK:p1' } as never))?.text).toContain('◀ here')
   await has(ui, /started with: add a discount step/)
+  await ui.press({ key: 'pane:wK:p1F' } as never)
+  expect(focused).toEqual(['wK:p1F'])
 })
 
 test('a diff loses carriage returns and keeps whole hunks when long', () => {
