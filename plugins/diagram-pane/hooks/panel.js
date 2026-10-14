@@ -26,7 +26,7 @@ export const W = {
   tab: 'map',
   repo: null,        // the git repository the chat works in: its root
   git: null,         // { branch, baseRef, baseLabel, files, diffs, at, error }
-  diffMode: 'branch',// 'branch': against where the branch left its base; 'head': uncommitted only
+  diffMode: 'chat',  // 'chat': since this chat started; 'branch': since the branch left its base; 'head': uncommitted only
   openFile: null,    // the file whose diff the diffs tab shows
   gh: null,          // { pr, checks, runs, sync, at, error }
   chain: null,       // { sessions, overall, overallOf }
@@ -108,9 +108,22 @@ async function git($, args, timeoutMs = 15000) {
   return r.isStdoutTruncated ? r.stdout.slice(0, Math.max(0, r.stdout.lastIndexOf('\ndiff --git '))) : r.stdout
 }
 
+// A repository born during the chat is compared with nothing at all
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
+export const DIFF_MODES = ['chat', 'branch', 'head']
+const MODE_NAMES = { chat: 'this chat', branch: 'whole branch', head: 'uncommitted' }
+
 // The base the branch is compared with: where it left origin's default branch
 async function baseOf($) {
   if (W.diffMode === 'head') return { ref: 'HEAD', label: 'uncommitted' }
+  if (W.diffMode === 'chat') {
+    // The commit HEAD was on when the chat started: committed or not, what
+    // changed since is this chat's work (and anything pulled in meanwhile)
+    const { startedAt } = await $.session.usage()
+    const at = (await git($, ['rev-list', '-1', `--before=@${Math.floor(startedAt / 1000)}`, 'HEAD']))?.trim()
+    return { ref: at || EMPTY_TREE, label: `this chat (since ${clock(startedAt).split(' ')[1]})` }
+  }
   const head = (await git($, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']))?.trim()
   const candidates = [head, 'origin/main', 'origin/master', 'main', 'master'].filter(Boolean)
   for (const c of candidates) {
@@ -131,12 +144,14 @@ export async function refreshGit($) {
     }
     const branch = (await git($, ['rev-parse', '--abbrev-ref', 'HEAD']))?.trim() || '?'
     const base = await baseOf($)
-    const [numstat, status, nameStatus, diff] = await Promise.all([
+    const [numstat, status, nameStatus, diff, log] = await Promise.all([
       git($, ['diff', '--numstat', '-M', base.ref]),
       git($, ['status', '--porcelain=v1', '--untracked-files=all']),
       git($, ['diff', '--name-status', '-M', base.ref]),
       git($, ['diff', '-M', '--no-color', base.ref], 30000),
+      base.ref === 'HEAD' || base.ref === EMPTY_TREE ? '' : git($, ['log', '--format=%h %s', `${base.ref}..HEAD`]),
     ])
+    const commits = (log || '').split('\n').filter(Boolean)
     const diffs = splitDiff(diff || '')
     // Untracked files have no diff in git: their lines are all new
     const untracked = {}
@@ -163,7 +178,7 @@ export async function refreshGit($) {
       }
     }))
     files.sort((a, b) => b.mtime - a.mtime)
-    W.git = { branch, baseRef: base.ref, baseLabel: base.label, files, diffs, at: await $.clock.now() }
+    W.git = { branch, baseRef: base.ref, baseLabel: base.label, files, diffs, commits, at: await $.clock.now() }
     if (W.openFile && !files.some(f => f.path === W.openFile)) W.openFile = null
   } catch (err) {
     W.git = { ...(W.git || { files: [], diffs: {} }), error: 'git: ' + err.message }
@@ -389,11 +404,25 @@ export function diffItems(w, act, now) {
   const add$ = g.files.reduce((n, f) => n + f.add, 0)
   const del$ = g.files.reduce((n, f) => n + f.del, 0)
   add(spread('◆ DIFFS ' + g.baseLabel, `${g.files.length} files +${add$} −${del$}`, w), { bold: true, color: 'green' })
+  const nextMode = DIFF_MODES[(DIFF_MODES.indexOf(W.diffMode) + 1) % DIFF_MODES.length]
   out.push({ buttons: [
-    { key: 'mode', hotkey: 'v', label: W.diffMode === 'branch' ? 'show uncommitted' : 'show whole branch', onPress: () => act?.diffMode() },
+    { key: 'mode', hotkey: 'v', label: 'show ' + MODE_NAMES[nextMode], onPress: () => act?.diffMode() },
     { key: 'refresh', hotkey: 'r', label: 'refresh', onPress: () => act?.refresh() },
   ] })
-  if (!g.files.length) add('No changes.', { dim: true })
+  add(short(`repo ${W.repo}`, w), { dim: true })
+  if (g.commits?.length) {
+    add(`${g.commits.length} commit${g.commits.length > 1 ? 's' : ''} in this range:`, { dim: true })
+    for (const c of g.commits.slice(0, 5)) add(short('  ' + c, w), { dim: true })
+    if (g.commits.length > 5) add(`  … ${g.commits.length - 5} more`, { dim: true })
+  }
+  if (!g.files.length) {
+    add({
+      chat: 'Nothing changed in this repository since this chat started.',
+      branch: 'Nothing changed since the branch left its base: all of it is merged or pushed.',
+      head: 'No uncommitted changes.',
+    }[W.diffMode], { dim: true, wrap: true })
+    add(`v shows ${MODE_NAMES[nextMode]}.`, { dim: true })
+  }
   const wide = Math.max(10, w - 26)
   g.files.forEach((f, i) => {
     const counts = f.binary ? 'bin' : `+${f.add} −${f.del}`

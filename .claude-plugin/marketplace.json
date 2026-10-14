@@ -34,7 +34,7 @@
       "name": "diagram-pane",
       "source": "./plugins/diagram-pane",
       "description": "A side pane with the live work map and pinned diagrams, plus tabs for diffs, the PR and its CI, and every chat this terminal tab has held",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "Ray Amjad"
       },
@@ -64,7 +64,7 @@
       "name": "memory-fork",
       "source": "./plugins/memory-fork",
       "description": "After each turn Haiku decides whether memory needs a change; a tool-less fork of the session drafts it and the mod writes it, with a band and a pane showing what changed",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "Ray Amjad"
       },

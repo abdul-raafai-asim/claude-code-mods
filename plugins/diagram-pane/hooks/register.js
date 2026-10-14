@@ -16,7 +16,7 @@
 import { findDiagrams, parseMermaid, drawGraph, short } from './draw.js'
 import { adoptIds, allIds, applyOps, boxOf, carrySubs, cleanId, levelAt, setLevel, toMermaid, uniqueIds } from './graph.js'
 import {
-  TABS, W, plain, chatItems, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
+  DIFF_MODES, TABS, W, plain, chatItems, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
   startPanelSession, updateChain,
 } from './panel.js'
 
@@ -495,7 +495,7 @@ function actions($) {
       await redraw($)
     },
     diffMode: async () => {
-      W.diffMode = W.diffMode === 'branch' ? 'head' : 'branch'
+      W.diffMode = DIFF_MODES[(DIFF_MODES.indexOf(W.diffMode) + 1) % DIFF_MODES.length]
       W.openFile = null
       await refreshGit($)
       await redraw($)
