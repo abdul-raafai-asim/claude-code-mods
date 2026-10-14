@@ -10,7 +10,7 @@
 
 import { short } from './draw.js'
 import {
-  STAGES, STATUS_MARK, ago, progressFrom, stageRows, changedFiles, ciWord, herdrPanes, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
+  STAGES, STATUS_MARK, ago, paneOwner, progressFrom, stageRows, changedFiles, ciWord, herdrPanes, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
 } from './work.js'
 
 export const TABS = [
@@ -40,6 +40,10 @@ export const W = {
   touched: [],       // files Claude wrote this session, newest last, absolute
   fetched: {},       // base branch -> when origin's copy was last fetched
   herdr: null,       // { bin, workspace, pane, tab, label, panes, at, error }: the tab's live panes
+  tabFile: undefined,// the herdr tab's record of which pane shows the pane (null outside herdr)
+  myPane: null,      // this chat's herdr pane
+  paneOwner: null,   // the herdr pane that shows the tab's pane
+  hidden: false,     // hidden outside herdr, where no tab record is kept
   msgs: [],          // the transcript as last read, for the progress tab
   declared: null,    // { input, seen }: the last progress_set, until the transcript holds it
   busy: { git: false, gh: false, overall: false },
@@ -412,6 +416,65 @@ export async function focusPane($, pane) {
 }
 
 // ---------------------------------------------------------------------------
+// One pane per herdr tab
+// ---------------------------------------------------------------------------
+
+// The tab's record, { owner: herdr pane, hidden, at }, is a file every chat in
+// the tab reads: $.store is each process's own copy
+async function tabFile($) {
+  if (W.tabFile !== undefined) return W.tabFile
+  const [pane, tab, home] = await Promise.all([$.env.get('HERDR_PANE_ID'), $.env.get('HERDR_TAB_ID'), $.env.get('HOME')])
+  W.myPane = (await $.env.get('HERDR_ENV')) === '1' && pane && tab ? pane : null
+  W.tabFile = W.myPane && home ? `${home}/.claude/diagram-pane/tabs/${String(tab).replace(/[^\w-]/g, '_')}.json` : null
+  return W.tabFile
+}
+
+async function readTab($) {
+  const file = await tabFile($)
+  if (!file) return null
+  try {
+    return JSON.parse(await $.fs.read(file))
+  } catch {
+    return null
+  }
+}
+
+export async function writeTab($, fields) {
+  const file = await tabFile($)
+  if (!file) return
+  const rec = { ...(await readTab($)), ...fields, at: await $.clock.now() }
+  await $.fs.write(file, JSON.stringify(rec) + '\n')
+}
+
+// Whether this chat shows the tab's pane, claiming it when it is new to the tab
+// or the owner's pane is gone. `herdr` asks herdr which panes still run an agent.
+export async function settleOwner($, { fresh = false, herdr = false } = {}) {
+  const rec = await readTab($)
+  if (!W.myPane) return { show: !W.hidden }
+  let live = null
+  if (herdr && rec?.owner && rec.owner !== W.myPane && !fresh) {
+    await refreshHerdr($)
+    if (W.herdr?.at && !W.herdr.error) live = W.herdr.panes
+  }
+  const d = paneOwner(rec, W.myPane, live, { fresh })
+  if (d.claim) await writeTab($, { owner: W.myPane })
+  W.paneOwner = d.claim || rec?.owner === W.myPane ? W.myPane : rec?.owner
+  return d
+}
+
+// /diagram and the pane's hide button: this chat takes the pane, or the tab hides it
+// (outside herdr, for this chat alone)
+export async function showHere($) {
+  W.hidden = false
+  await writeTab($, { owner: W.myPane, hidden: false })
+}
+
+export async function hideTab($) {
+  W.hidden = true
+  await writeTab($, { hidden: true })
+}
+
+// ---------------------------------------------------------------------------
 // Progress
 // ---------------------------------------------------------------------------
 
@@ -487,7 +550,7 @@ export function headItems(w, act, summary) {
   const out = []
   out.push({ buttons: TABS.map(t => ({
     key: 'tab:' + t.id, hotkey: t.hotkey, label: (W.tab === t.id ? '▸' : '') + t.label, onPress: () => act?.tab(t.id),
-  })) })
+  })).concat({ key: 'hide', hotkey: 'x', label: 'hide', onPress: () => act?.hide() }) })
   out.push({ text: short(strip(), w), dim: true })
   const what = summary || (W.firstPrompt ? 'started with: ' + W.firstPrompt : '')
   if (what) out.push({ text: '▍' + what, wrap: true, color: 'yellow' })

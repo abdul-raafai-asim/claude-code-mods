@@ -425,3 +425,17 @@ export function stageRows(p) {
     return { name, mark, ...(s || {}) }
   })
 }
+
+// One pane per herdr tab. `rec` is the tab's record ({ owner, hidden }), `me`
+// this chat's herdr pane, `live` the tab's agent panes (null when unknown).
+// A chat claims the pane when it is new to the tab (a handoff's chat takes over
+// from the one it left) or the owner's pane is gone. It shows the pane when it
+// owns it and nobody hid it. Outside herdr every chat has a terminal pane of
+// its own, so it always shows.
+export function paneOwner(rec, me, live, { fresh = false } = {}) {
+  if (!me) return { show: true, claim: false }
+  const owner = rec?.owner || null
+  const alive = Boolean(owner) && (owner === me || !live || live.some(p => p.pane === owner))
+  const mine = owner === me || fresh || !alive
+  return { show: mine && !rec?.hidden, claim: mine && owner !== me }
+}

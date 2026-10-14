@@ -17,7 +17,7 @@ import { findDiagrams, parseMermaid, drawGraph, short } from './draw.js'
 import { adoptIds, allIds, applyOps, boxOf, carrySubs, cleanId, levelAt, setLevel, toMermaid, uniqueIds } from './graph.js'
 import {
   DIFF_MODES, TABS, W, plain, chatItems, declare, focusPane, progressItems, refreshHerdr, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
-  startPanelSession, updateChain,
+  hideTab, settleOwner, showHere, startPanelSession, updateChain,
 } from './panel.js'
 
 const PANE = 'diagrams'
@@ -72,11 +72,13 @@ export function register(on, options) {
 
   on('session.start', async ($, e, next) => {
     W.interactive = e.isInteractive !== false
-    // Open the pane right away. Unasked, it is placed on a wide terminal (144+ columns);
-    // /diagram opens it at any width.
-    await $.ui.open({ id: PANE, title: 'Diagrams' })
+    // Open the pane right away, unless another chat in this herdr tab shows it.
+    // A new chat (a handoff's) takes it over; a reload of this one does not.
+    // Unasked, it is placed on a wide terminal (144+ columns); /diagram opens it at any width.
+    const fresh = W.interactive && (await $.session.messages()).length === 0
+    await placePane($, { fresh, herdr: true })
     try {
-      await $.command.register({ name: 'diagram', description: 'The work pane: map, progress, diffs, GitHub and the chats in this tab', argumentHint: '[force|open|map|progress|diffs|github|chats]' })
+      await $.command.register({ name: 'diagram', description: 'Show or hide the work pane for this tab: map, progress, diffs, GitHub, chats', argumentHint: '[show|hide|force|open|map|progress|diffs|github|chats]' })
     } catch (err) {
       $.ui.log('could not add /diagram: ' + err.message)
     }
@@ -89,6 +91,8 @@ export function register(on, options) {
     }
     // The diffs, the GitHub state and the relative times go stale between turns
     $.clock.every(15000, () => void tick($).catch(() => {}))
+    // Another chat in the tab took the pane, or the tab hid or showed it
+    $.clock.every(3000, () => void placePane($).catch(() => {}))
     void tick($, true).catch(() => {})
     return next(e)
   })
@@ -120,7 +124,7 @@ export function register(on, options) {
     if (e.agentId || e.isAborted) return result
     const messages = await sync($)
     S.sinceMap += 1
-    if (S.pins.length && !(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: 'Diagrams' })
+    await placePane($)
     S.every = Number(await $.env.get('DIAGRAM_PANE_EVERY')) || every
     const waitSync = await $.env.get("DIAGRAM_PANE_SYNC")
     if (S.sinceMap >= S.every || overdue()) {
@@ -148,7 +152,20 @@ export function register(on, options) {
   on('command.run', { command: 'diagram' }, async ($, e) => {
     const arg = e.args.trim()
     const tab = TABS.find(t => t.id === arg || (arg === 'diff' && t.id === 'diffs') || (arg === 'gh' && t.id === 'github'))
-    await $.ui.open({ id: PANE, title: 'Diagrams', ...(arg === 'open' || tab ? { focus: true } : {}) })
+    // Bare /diagram toggles the pane for the whole tab; any other form shows it here
+    const shown = (await settleOwner($)).show && (await $.ui.panes()).some(p => p.id === PANE)
+    if (arg === 'hide' || (arg === '' && shown)) {
+      await hidePane($)
+      return {}
+    }
+    await alone(async () => {
+      await showHere($)
+      await $.ui.open({ id: PANE, title: 'Diagrams', ...(arg === 'open' || tab ? { focus: true } : {}) })
+    })
+    if (arg === 'show') {
+      void tick($, true).catch(() => {})
+      return {}
+    }
     const messages = await sync($)
     if (tab) {
       W.tab = tab.id
@@ -189,13 +206,20 @@ export function register(on, options) {
       await sync($)
       const text = setDiagram(resolveTarget(String(e.target || 'view')), e)
       await saveSaved($)
-      if (!(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: 'Diagrams' })
+      await placePane($)
       await redraw($)
       return { result: text }
     } catch (err) {
       return { deny: 'diagram_set: ' + err.message }
     }
   }).catch(() => ({ deny: 'diagram_set failed; the pane is unchanged.' }))
+
+  // Closed by hand (its mark, ctrl+x x): hidden for the whole tab until /diagram
+  on('ui.close', async ($, e, next) => {
+    const result = await next(e)
+    if (e.id === PANE && e.origin?.kind === 'person') await hideTab($).catch(() => {})
+    return result
+  }).catch(($, e, next) => next(e))
 
   // The pane itself: lines of Text, rows of Buttons, and one Input
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -509,6 +533,7 @@ function actions($) {
       await refreshGit($)
       await redraw($)
     },
+    hide: () => hidePane($),
     refresh: async () => {
       if (W.tab === 'github') await refreshGh($)
       else await refreshGit($)
@@ -963,6 +988,7 @@ const textOnly = text => String(text ?? '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g
 async function tick($, force = false) {
   // A /clear starts a new session with no event of its own until its first turn ends
   if (!S.sessionId || S.sessionId !== (await $.session.id())) await sync($)
+  if (!(await placePane($, { herdr: true })) && !force) return
   if (!force && !(await $.ui.panes()).some(p => p.id === PANE)) return
   const now = await $.clock.now()
   if (force || W.tab === 'diffs' || now >= W.gitDueAt) {
@@ -974,6 +1000,38 @@ async function tick($, force = false) {
   if (force && W.tab === 'chats') await updateChain($, { turns: S.turn })
   await redraw($)
 }
+
+// Open or close the pane as the tab's record says; true when this chat shows it
+let placing = Promise.resolve(true)
+let holds = 0
+function placePane($, opts = {}) {
+  if (holds) return placing
+  placing = placing.catch(() => {}).then(async () => {
+    const { show } = await settleOwner($, opts)
+    const up = (await $.ui.panes()).some(p => p.id === PANE)
+    if (show && !up) await $.ui.open({ id: PANE, title: 'Diagrams' })
+    if (!show && up) await $.ui.close({ id: PANE })
+    return show
+  })
+  return placing
+}
+
+// A show or hide the person asked for: no check of the record runs meanwhile,
+// so none read before the change can undo it
+async function alone(work) {
+  holds++
+  try {
+    await placing.catch(() => {})
+    return await work()
+  } finally {
+    holds--
+  }
+}
+
+const hidePane = $ => alone(async () => {
+  await hideTab($)
+  if ((await $.ui.panes()).some(p => p.id === PANE)) await $.ui.close({ id: PANE })
+})
 
 // Ask for a redraw, and in tests also write the pane's text to a file
 async function redraw($) {

@@ -56,11 +56,15 @@ Or inside Claude Code: `/plugin marketplace add abdul-raafai-asim/claude-code-mo
 
 The pane opens on its own in a terminal 144 columns or wider. Narrower than that, type `/diagram` once and it opens at any width. With fullscreen rendering it docks beside the transcript; in the classic renderer it sits above the prompt.
 
+**One pane per herdr tab.** Under herdr, only one chat in a tab shows the pane, however many chats the tab holds. A new chat in the tab, such as a handoff's, takes the pane over, and the chat it left closes its own. When the chat that shows it exits, the next chat to check (within 15 seconds) takes it. `/diagram` in any chat moves the pane there. The tab's record is `~/.claude/diagram-pane/tabs/<tab>.json`. Outside herdr each chat has a terminal pane of its own, so each shows its own.
+
+**Show and hide.** A bare `/diagram` toggles the pane. Hiding is for the whole tab: the pane stays hidden in every chat in the tab, and in new ones, until you show it again. The `x hide` button in the pane's tab row, the pane's close mark and ctrl+x x hide it the same way. `/diagram hide` and `/diagram show` do one or the other.
+
 ## Usage
 
 - Ask for a diagram (`explain the checkout flow with a mermaid flowchart`) and it is pinned when the turn ends.
 - `/diagram diffs`, `/diagram github`, `/diagram chats`, `/diagram map` open the pane on that tab, with the keyboard.
-- `/diagram` runs the gate now and redraws the map if the work changed. `/diagram force` skips the gate and draws the map from scratch, dropping edits.
+- `/diagram` shows the pane (hidden or in another chat) and runs the gate, redrawing the map if the work changed; when this chat already shows it, `/diagram` hides it for the tab. `/diagram force` skips the gate and draws the map from scratch, dropping edits.
 - `/diagram open` gives the pane the keyboard, so number keys work at once. Clicking the pane, or ctrl+x tab, does the same; Esc hands the keys back to the prompt.
 - Ask Claude to change what you are looking at: "add the NAT gateway to the network box", "move the cache under the API layer". It calls `diagram_get`, then `diagram_set`, and the pane shows the changed level.
 
