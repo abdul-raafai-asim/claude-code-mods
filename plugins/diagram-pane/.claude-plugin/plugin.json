@@ -1,6 +1,6 @@
 {
   "name": "diagram-pane",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "A side pane with the live work map and pinned diagrams, plus tabs for progress, diffs, the PR and its CI, and every chat this terminal tab has held",
   "author": { "name": "Ray Amjad", "url": "https://github.com/ray-amjad" },
   "repository": "https://github.com/abdul-raafai-asim/claude-code-mods/tree/main/plugins/diagram-pane",

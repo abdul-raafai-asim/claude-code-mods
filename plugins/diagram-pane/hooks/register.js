@@ -153,7 +153,8 @@ export function register(on, options) {
     const arg = e.args.trim()
     const tab = TABS.find(t => t.id === arg || (arg === 'diff' && t.id === 'diffs') || (arg === 'gh' && t.id === 'github'))
     // Bare /diagram toggles the pane for the whole tab; any other form shows it here
-    const shown = (await settleOwner($)).show && (await $.ui.panes()).some(p => p.id === PANE)
+    // (open but undrawn, on a narrow terminal, counts as not shown)
+    const shown = (await settleOwner($)).show && (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
     if (arg === 'hide' || (arg === '' && shown)) {
       await hidePane($)
       return {}

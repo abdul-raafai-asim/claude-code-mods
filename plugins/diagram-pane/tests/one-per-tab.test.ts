@@ -25,7 +25,7 @@ const FILE = '/home/.claude/diagram-pane/tabs/wK_t1.json'
 
 function world(on: any) {
   const files: Record<string, string> = {}
-  const pane = { up: true, opens: 0, closes: 0 }
+  const pane = { up: true, placed: true, opens: 0, closes: 0 }
   mock.store(on)
   mock.clock(on)
   mock.env(on, { HERDR_ENV: '1', HERDR_TAB_ID: 'wK:t1', HERDR_PANE_ID: 'wK:p2', HERDR_WORKSPACE_ID: 'wK', HERDR_BIN_PATH: '/bin/herdr', HOME: '/home', DIAGRAM_PANE_SYNC: '1' })
@@ -35,8 +35,8 @@ function world(on: any) {
   on('session.messages', () => ({ value: [{ role: 'user', text: 'hi', toolUses: [] }] }))
   on('fs.read', (_: any, e: any) => (e.path in files ? { value: files[e.path] } : { deny: 'ENOENT' }))
   on('fs.write', (_: any, e: any) => ((files[e.path] = e.text), { value: undefined }))
-  on('ui.panes', () => ({ value: pane.up ? [{ id: 'diagrams', title: 'Diagrams', isPlaced: true }] : [] }))
-  on('ui.open', () => ((pane.up = true), pane.opens++, { value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: pane.up ? [{ id: 'diagrams', title: 'Diagrams', isPlaced: pane.placed }] : [] }))
+  on('ui.open', () => ((pane.up = true), (pane.placed = true), pane.opens++, { value: { isPlaced: true } }))
   on('ui.close', () => ((pane.up = false), pane.closes++, { value: undefined }))
   on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'no', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('model.complete', () => ({ value: { isAnswered: false, reason: 'test' } }))
@@ -75,4 +75,13 @@ test('/diagram hide, then a hidden tab stays hidden', async ($, on) => {
   expect(w.pane.up).toBe(false)
   await $.command.run({ command: 'diagram', args: 'show' } as never)
   expect(w.pane.up).toBe(true)
+})
+
+test('in a narrow chat, where the pane waits undrawn, bare /diagram shows it', async ($, on) => {
+  const w = world(on)
+  w.files[FILE] = JSON.stringify({ owner: 'wK:p2' })
+  w.pane.placed = false
+  await $.command.run({ command: 'diagram', args: '' } as never)
+  expect(w.rec().hidden).toBe(false)
+  expect(w.pane).toMatchObject({ up: true, placed: true })
 })
