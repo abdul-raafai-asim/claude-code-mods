@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import {
-  ciWord, changedFiles, parseNameStatus, progressFrom, stageRows, handoffFrom, joinChain, parseNumstat, renamedTo, splitDiff, tabIdFrom, tallyChecks,
+  ciWord, changedFiles, commandsIn, commitMessage, parseNameStatus, progressFrom, stageRows, handoffFrom, joinChain, parseNumstat, renamedTo, splitDiff, tabIdFrom, tallyChecks,
 } from '../hooks/work.js'
 import { fitDiff, plain } from '../hooks/panel.js'
 
@@ -215,7 +215,8 @@ test('the oldest of a tab\'s chain stays when a later chat starts in the same pr
   expect(c.sessions.length).toBe(2)
 })
 
-const use = (tool: string, input: Record<string, unknown>, isError = false) => ({ role: 'assistant', text: '', toolUses: [{ tool, input, isError }] })
+const use = (tool: string, input: Record<string, unknown>, isError = false) =>
+  ({ role: 'assistant', text: '', toolUses: [{ tool, input, text: 'ok', ...(isError ? { isError: true } : {}) }] })
 const say = (text: string) => ({ role: 'user', text, toolUses: [] })
 
 test('progress follows the work: edits, tests, a review, fixes, a verify, git and CI', () => {
@@ -262,4 +263,30 @@ test('progress_set shows in the progress tab at once', async ($, on) => {
   await has(ui, /◆ PROGRESS .*now: review/)
   await has(ui, /Claude: adversarial pass 2\/5/)
   await has(ui, /✓ implement/)
+})
+
+test('a chained command marks each stage it runs, and quoted text marks none', () => {
+  const marks = (cmd: string, isError = false) => {
+    const p = progressFrom([say('x'), use('Bash', { command: cmd }, isError)])
+    return stageRows(p).filter(r => r.mark !== '·' && r.mark !== '–').map(r => r.name + r.mark).join(' ')
+  }
+  expect(marks('git add -A && git commit -m "x" && git push')).toBe('commit✓ push▶')
+  expect(marks('git push -u origin b && gh pr create --fill')).toBe('push✓ pr▶')
+  expect(marks('rg -n "git push" hooks/')).toBe('')
+  expect(marks('cat jest.config.js && pip install pytest && grep vitest package.json', true)).toBe('')
+  expect(marks('git push', true)).toBe('push✗')
+  expect(marks('FOO=1 npx vitest run')).toBe('test▶')
+  expect(commandsIn("python3 - <<'EOF'\nprint('git push')\nEOF")).toEqual(['python3 - <<'])
+  expect(commitMessage('git commit -am "fix: the \\"thing\\""')).toBe('fix: the "thing"')
+  expect(commitMessage("git commit -q -F - <<'EOF'\nAdd the thing\n\nbody\nEOF")).toBe('Add the thing')
+})
+
+test('CI shows running, and a merged PR does not hide later work', () => {
+  const pushed = [say('x'), use('Bash', { command: 'git push' })]
+  const running = progressFrom(pushed, { pr: { number: 1, state: 'OPEN' }, checks: { pass: 1, fail: 0, pending: 2, skip: 0 } })
+  expect(running.now).toBe('ci')
+  const later = progressFrom([...pushed, use('Edit', { file_path: '/r/a.js' })], { pr: { number: 1, state: 'MERGED' }, checks: { pass: 1, fail: 0, pending: 2, skip: 0 } })
+  expect(later.now).toBe('implement')
+  expect(stageRows(later).find(r => r.name === 'ci')?.mark).toBe('…')
+  expect(progressFrom(pushed, { pr: { number: 1, state: 'MERGED' } }).now).toBe('merge')
 })

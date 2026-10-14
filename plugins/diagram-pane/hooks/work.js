@@ -289,41 +289,83 @@ export function leftCut(path, n) {
 export const STAGES = ['plan', 'implement', 'test', 'review', 'fix', 'verify', 'commit', 'push', 'pr', 'ci', 'merge']
 
 const EDITS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
-const TEST_RE = /(\bpytest\b|\bjest\b|\bvitest\b|\bmocha\b|\brspec\b|\bgo test\b|\bcargo test\b|\b(npm|pnpm|yarn|bun)( run)? test\b|\bplugin test\b|\bmake test\b|\btox\b|\bphpunit\b|\bplaywright test\b|\bunittest\b)/
-const SHELL_EDIT_RE = /\bsed -i\b|\bpython3? - <<|\bcat >+ |\btee \b|\bpatch -p/
 const REVIEW_RE = /\b(review|audit|adversarial|critique|find (the )?bugs|verify (the )?findings)\b/i
 
-// One signal from a tool call: { stage, note } or null. `after` says what has
-// happened before it, since an edit after a review is a fix and a test after
-// a fix is a verify.
-function signalOf(t, after) {
+// A command as a list of the commands it runs: heredoc bodies and quoted text
+// dropped (a grep for "git push" pushes nothing), split at && || ; | and newlines,
+// each without the VAR=value words before it
+export function commandsIn(cmd) {
+  return String(cmd || '')
+    .replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2\b/g, '<<')
+    .replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""')
+    .split(/&&|\|\||[;|\n]/)
+    .map(c => c.trim().replace(/^(\w+=\S*\s+)+/, '').replace(/^(cd \S+\s*)$/, ''))
+    .filter(Boolean)
+}
+
+// One command that runs tests: a runner in the command's own place, never a
+// file name (jest.config.js) or an install (pip install pytest)
+const TEST_RUNNER = /^((npx|pnpx|bunx|uv run|poetry run|python3? -m)\s+)?(pytest|jest|vitest|mocha|rspec|tox|phpunit|unittest)(\s|$)|^(go|cargo) test\b|^(npm|pnpm|yarn|bun)( run)? test\b|^claude plugin test\b|^make (test|check)\b|^(npx )?playwright test\b/
+const GIT = /^git(\s+-[Cc]\s+\S+)*\s+/
+const SHELL_EDIT_RE = /^sed -i\b|^python3? - <<|^python3? -\s*$|^cat >|^tee\b|^patch\b|^perl -p?i/
+
+// The commit message a git commit names: -m "...", -am '...', or a heredoc's first line
+export function commitMessage(cmd) {
+  const m = /\s-[a-zA-Z]*m\s*(["'])((?:\\.|(?!\1)[^\\])*)\1/.exec(cmd)
+  if (m && !m[2].startsWith('$(')) return m[2].replace(/\\(.)/g, '$1').split('\n')[0]
+  const h = /<<-?\s*['"]?(\w+)['"]?[^\n]*\n\s*([^\n]+)/.exec(cmd)
+  return h ? h[2].trim() : ''
+}
+
+// The signals of one tool call, in order: [{ stage, note, failed, file }].
+// `after` says what came before, since an edit after a review is a fix and a
+// test after a fix is a verify.
+function signalsOf(t, after) {
   const i = t.input || {}
-  if (t.tool === 'mcp__diagram-pane__progress_set' && STAGES.includes(i.stage)) {
+  const running = t.text === undefined && t.result === undefined && !t.isError
+  if (t.tool === 'mcp__diagram-pane__progress_set') {
+    if (!STAGES.includes(i.stage)) return []
     const of = i.total ? ` ${i.done ?? 0}/${i.total}` : ''
-    return { stage: i.stage, note: (i.note || '') + of, declared: true }
+    return [{ stage: i.stage, note: (i.note || '') + of, declared: true }]
   }
-  if (['ExitPlanMode', 'EnterPlanMode', 'TodoWrite'].includes(t.tool)) return { stage: 'plan', note: t.tool }
-  if (EDITS.includes(t.tool)) {
-    return { stage: after.has('review') ? 'fix' : 'implement', file: String(i.file_path || i.notebook_path || '') }
-  }
+  if (['ExitPlanMode', 'EnterPlanMode', 'TodoWrite'].includes(t.tool)) return [{ stage: 'plan', note: t.tool }]
+  if (EDITS.includes(t.tool)) return [{ stage: after.has('review') ? 'fix' : 'implement', file: String(i.file_path || i.notebook_path || '') }]
   if (['Agent', 'Task'].includes(t.tool)) {
-    if (i.subagent_type === 'Plan') return { stage: 'plan', note: i.description || 'Plan agent' }
-    if (REVIEW_RE.test(`${i.description || ''} ${i.prompt || ''}`.slice(0, 2000))) return { stage: 'review', note: i.description || 'review agent' }
-    return null
+    if (i.subagent_type === 'Plan') return [{ stage: 'plan', note: i.description || 'Plan agent' }]
+    if (REVIEW_RE.test(`${i.description || ''} ${i.prompt || ''}`.slice(0, 2000))) return [{ stage: 'review', note: i.description || 'review agent' }]
+    return []
   }
-  if (t.tool === 'Skill' && /review/.test(String(i.skill || ''))) return { stage: 'review', note: '/' + i.skill }
-  if (t.tool !== 'Bash') return null
-  const cmd = String(i.command || '')
-  if (/\bgh pr merge\b/.test(cmd)) return { stage: 'merge', note: 'gh pr merge' }
-  if (/\bgh pr create\b/.test(cmd)) return { stage: 'pr', note: 'gh pr create' }
-  if (/\bgit push\b/.test(cmd)) return { stage: 'push', note: t.isError ? 'failed' : '' }
-  if (/\bgit commit\b/.test(cmd)) {
-    const m = /-m\s+(["'])(.*?)\1/.exec(cmd) || /\n([^\n]{4,})\n/.exec(cmd.split('<<')[1] || '')
-    return { stage: 'commit', note: m ? (m[2] || m[1]).split('\n')[0] : '' }
+  if (t.tool === 'Skill' && /review/.test(String(i.skill || ''))) return [{ stage: 'review', note: '/' + i.skill }]
+  if (t.tool !== 'Bash') return []
+  const raw = String(i.command || '')
+  const out = []
+  const seen = new Set(after)
+  for (const c of commandsIn(raw)) {
+    let sig = null
+    const g = GIT.test(c) ? c.replace(GIT, '') : null
+    if (g?.startsWith('commit')) sig = { stage: 'commit', note: commitMessage(raw) }
+    else if (g?.startsWith('push')) sig = { stage: 'push' }
+    else if (/^gh pr create\b/.test(c)) sig = { stage: 'pr', note: 'gh pr create' }
+    else if (/^gh pr merge\b/.test(c)) sig = { stage: 'merge', note: 'gh pr merge' }
+    else if (TEST_RUNNER.test(c)) sig = { stage: seen.has('fix') ? 'verify' : 'test', note: c.split(/\s+/).slice(0, 3).join(' '), test: true }
+    else if (SHELL_EDIT_RE.test(c)) sig = { stage: seen.has('review') ? 'fix' : 'implement' }
+    if (sig) {
+      out.push(sig)
+      seen.add(sig.stage)
+    }
   }
-  if (TEST_RE.test(cmd)) return { stage: after.has('fix') ? 'verify' : 'test', note: (TEST_RE.exec(cmd)[0]) + (t.isError ? ' · failed' : ' · passed'), failed: Boolean(t.isError) }
-  if (SHELL_EDIT_RE.test(cmd)) return { stage: after.has('review') ? 'fix' : 'implement' }
-  return null
+  // Which part of a chain failed is not said: the last part that marks a stage
+  // carries the call's outcome, and the parts before it went through
+  const last = out.at(-1)
+  if (last) {
+    if (running) last.note = [last.note, 'running'].filter(Boolean).join(' · ')
+    else {
+      last.failed = Boolean(t.isError)
+      if (last.test) last.note += t.isError ? ' · failed' : ' · passed'
+      else if (t.isError) last.note = [last.note, 'failed'].filter(Boolean).join(' · ')
+    }
+  }
+  return out
 }
 
 // The stages as the transcript shows them: { stages: { name -> { turn, last,
@@ -337,34 +379,36 @@ export function progressFrom(messages, { pr, checks, seed } = {}) {
   for (const m of messages || []) {
     if (m.role === 'user' && m.text && !m.toolResults?.length) turn++
     for (const t of m.toolUses || []) {
-      const sig = signalOf(t, after)
-      if (!sig) continue
-      const s = (stages[sig.stage] ||= { turn, files: [] })
-      s.last = turn
-      if (sig.note) s.note = sig.note
-      if (sig.file && !s.files.includes(sig.file)) s.files.push(sig.file)
-      if ('failed' in sig) s.failed = sig.failed
-      after.add(sig.stage)
-      now = sig.stage
-      declared = sig.declared ? sig.note : null
-    }
-  }
-  if (pr) {
-    if (!stages.pr) stages.pr = { turn: null, files: [], note: `#${pr.number}` }
-    if (checks && checks.pass + checks.fail + checks.pending > 0) {
-      stages.ci = { turn: null, files: [], note: checks.fail ? `${checks.fail} failing` : checks.pending ? `${checks.pending} running` : `${checks.pass} passed`, failed: checks.fail > 0, running: checks.pending > 0 }
-      // Once pushed, the work waits on CI; a later fix or test is the work again
-      if (STAGES.indexOf(now) >= STAGES.indexOf('push')) now = 'ci'
-    }
-    if (pr.state === 'MERGED') {
-      stages.merge = { turn: stages.merge?.turn ?? null, files: [], note: 'merged' }
-      now = 'merge'
+      for (const sig of signalsOf(t, after)) {
+        const s = (stages[sig.stage] ||= { turn, files: [] })
+        s.last = turn
+        if (sig.note) s.note = sig.note
+        if (sig.file && !s.files.includes(sig.file)) s.files.push(sig.file)
+        s.failed = Boolean(sig.failed)
+        after.add(sig.stage)
+        now = sig.stage
+        declared = sig.declared ? sig.note : null
+      }
     }
   }
   // A chat that came from a handoff starts where the one before it stood
   if (seed?.stages) {
     for (const [name, s] of Object.entries(seed.stages)) if (!stages[name]) stages[name] = { ...s, inherited: true }
     if (!now) now = seed.now
+  }
+  if (pr) {
+    if (!stages.pr) stages.pr = { turn: null, files: [], note: `#${pr.number}` }
+    // Once pushed, the work waits on CI and then the merge; a later edit or
+    // test is the work again, and stays the stage
+    const waiting = !now || STAGES.indexOf(now) >= STAGES.indexOf('push')
+    if (checks && checks.pass + checks.fail + checks.pending > 0) {
+      stages.ci = { turn: null, files: [], note: checks.fail ? `${checks.fail} failing` : checks.pending ? `${checks.pending} running` : `${checks.pass} passed`, failed: checks.fail > 0, running: checks.pending > 0 }
+      if (waiting && now !== 'merge') now = 'ci'
+    }
+    if (pr.state === 'MERGED') {
+      stages.merge = { turn: stages.merge?.turn ?? null, files: [], note: 'merged' }
+      if (waiting) now = 'merge'
+    }
   }
   return { stages, now, declared }
 }
@@ -376,7 +420,7 @@ export function stageRows(p) {
     const s = p.stages[name]
     let mark = '·'
     if (name === p.now) mark = s?.failed ? '✗' : '▶'
-    else if (s) mark = s.failed ? '✗' : '✓'
+    else if (s) mark = s.failed ? '✗' : s.running ? '…' : '✓'
     else if (i < at) mark = '–'
     return { name, mark, ...(s || {}) }
   })

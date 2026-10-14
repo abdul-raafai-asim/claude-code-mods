@@ -50,7 +50,7 @@ export const W = {
 // A new session id (/clear): the tab's chain goes on, the session's own facts start over
 export function startPanelSession(id) {
   if (W.sessionId === id) return
-  Object.assign(W, { sessionId: id, touched: [], firstPrompt: '', openFile: null, ctx: null })
+  Object.assign(W, { sessionId: id, touched: [], firstPrompt: '', openFile: null, ctx: null, msgs: [], declared: null })
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +126,8 @@ async function fetchBase($, branch) {
   const now = await $.clock.now()
   if (W.fetched[branch] && now - W.fetched[branch] < 300000) return
   W.fetched[branch] = now
-  await $.process.run(['git', 'fetch', '--quiet', '--no-tags', 'origin', branch], { cwd: W.repo, timeoutMs: 20000 }).catch(() => {})
+  // Never a credential prompt: a fetch that needs one just fails
+  await $.process.run(['git', 'fetch', '--quiet', '--no-tags', 'origin', branch], { cwd: W.repo, timeoutMs: 20000, env: { GIT_TERMINAL_PROMPT: '0' } }).catch(() => {})
 }
 
 // What a view compares: `ref` against the working tree, or `ref` to `to` (committed only)
@@ -155,8 +156,13 @@ async function baseOf($) {
 }
 
 export async function refreshGit($) {
-  if (W.busy.git) return
+  // A view switched while git runs is read again once it is done
+  if (W.busy.git) {
+    W.gitAgain = true
+    return
+  }
   W.busy.git = true
+  W.gitAgain = false
   try {
     W.repo = await findRepo($)
     if (!W.repo) {
@@ -216,6 +222,7 @@ export async function refreshGit($) {
   } finally {
     W.busy.git = false
   }
+  if (W.gitAgain) await refreshGit($)
 }
 
 // ---------------------------------------------------------------------------
@@ -409,20 +416,20 @@ export async function focusPane($, pane) {
 // ---------------------------------------------------------------------------
 
 const PROGRESS_TOOL = 'mcp__diagram-pane__progress_set'
-const declaredIn = msgs => msgs.reduce((n, m) => n + (m.toolUses || []).filter(t => t.tool === PROGRESS_TOOL).length, 0)
 
-// Claude's progress_set lands at once, before the transcript holds the call
-export function declare(input) {
-  W.declared = { input, seen: declareCount() }
+// Claude's progress_set lands at once; once the transcript holds the call
+// (by its id) the transcript's copy is the one read, in its place
+export function declare(input, id) {
+  W.declared = { input, id }
 }
-const declareCount = () => declaredIn(W.msgs)
+const holds = (msgs, id) => msgs.some(m => (m.toolUses || []).some(t => t.tool_use_id === id))
 
 // The chat's progress: the transcript's signals, the PR's CI and merge, and,
 // for a chat that came from a handoff, where the chat before it stood
 export function progress() {
   let msgs = W.msgs
-  if (W.declared && declareCount() <= W.declared.seen) {
-    msgs = [...msgs, { role: 'assistant', text: '', toolUses: [{ tool: PROGRESS_TOOL, input: W.declared.input }] }]
+  if (W.declared && !holds(msgs, W.declared.id)) {
+    msgs = [...msgs, { role: 'assistant', text: '', toolUses: [{ tool: PROGRESS_TOOL, input: W.declared.input, text: 'ok' }] }]
   }
   const row = W.chain?.sessions?.find(s => s.id === W.sessionId)
   const from = row?.from && W.chain.sessions.find(s => s.id === row.from)
@@ -539,7 +546,7 @@ export function diffItems(w, act, now) {
           continue
         }
         room -= source.length
-        if (f?.status !== 'D') out.push({ link: { href: `vscode://file${encodeURI(abs)}:${p.line}`, label: `↗ line ${p.line}` } })
+        if (f?.status !== 'D') out.push({ link: { href: `vscode://file${abs.split('/').map(encodeURIComponent).join('/')}:${p.line}`, label: `↗ line ${p.line}` } })
         out.push({ code: { source, path: W.openFile } })
       }
       if (cut) add(`… ${cut} hunk${cut > 1 ? 's' : ''} not drawn: too long for the pane (o opens the file)`, { dim: true })

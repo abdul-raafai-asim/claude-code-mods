@@ -170,7 +170,7 @@ export function register(on, options) {
   on('tool.call', { tool: 'mcp__diagram-pane__progress_set' }, async ($, e) => {
     if (!STAGE_LIST.includes(e.stage)) return { deny: `stage must be one of: ${STAGE_LIST.join(', ')}` }
     await sync($)
-    declare({ stage: e.stage, note: plain(e.note || ''), done: e.done, total: e.total })
+    declare({ stage: e.stage, note: plain(e.note || ''), done: e.done, total: e.total }, e.tool_use_id)
     await redraw($)
     return { result: `The progress pane shows: ${e.stage}${e.note ? ' · ' + e.note : ''}${e.total ? ` ${e.done ?? 0}/${e.total}` : ''}.` }
   }).catch(() => ({ deny: 'progress_set failed; the pane is unchanged.' }))
