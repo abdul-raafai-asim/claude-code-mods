@@ -64,7 +64,7 @@
       "name": "memory-fork",
       "source": "./plugins/memory-fork",
       "description": "After each turn Haiku decides whether memory needs a change; a tool-less fork of the session drafts it and the mod writes it, with a band and a pane showing what changed",
-      "version": "0.3.1",
+      "version": "0.3.0",
       "author": {
         "name": "Ray Amjad"
       },
