@@ -99,7 +99,8 @@ export function readMessages(messages, cwd) {
   }
   W.touched = touched
   W.msgs = messages
-  const first = messages.find(m => m.role === 'user' && m.text && !m.toolResults?.length)
+  // A slash command (/reload-plugins, /diagram) and its output are no prompt
+  const first = messages.find(m => m.role === 'user' && m.text && !m.toolResults?.length && !/^\s*<(command-|local-command-)/.test(m.text))
   W.firstPrompt = first ? plain(first.text) : ''
 }
 

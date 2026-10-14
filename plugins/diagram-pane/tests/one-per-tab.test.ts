@@ -23,7 +23,7 @@ test('the owner shows the pane, a new chat takes it over, a dead owner loses it'
 
 const FILE = '/home/.claude/diagram-pane/tabs/wK_t1.json'
 
-function world(on: any) {
+function world(on: any, messages: unknown[] = [{ role: 'user', text: 'hi', toolUses: [] }]) {
   const files: Record<string, string> = {}
   const pane = { up: true, placed: true, opens: 0, closes: 0 }
   mock.store(on)
@@ -32,7 +32,7 @@ function world(on: any) {
   on('session.id', () => ({ value: 's2' }))
   on('session.cwd', () => ({ value: '/repo' }))
   on('session.root', () => ({ value: '/repo' }))
-  on('session.messages', () => ({ value: [{ role: 'user', text: 'hi', toolUses: [] }] }))
+  on('session.messages', () => ({ value: messages }))
   on('fs.read', (_: any, e: any) => (e.path in files ? { value: files[e.path] } : { deny: 'ENOENT' }))
   on('fs.write', (_: any, e: any) => ((files[e.path] = e.text), { value: undefined }))
   on('ui.panes', () => ({ value: pane.up ? [{ id: 'diagrams', title: 'Diagrams', isPlaced: pane.placed }] : [] }))
@@ -84,4 +84,16 @@ test('in a narrow chat, where the pane waits undrawn, bare /diagram shows it', a
   await $.command.run({ command: 'diagram', args: '' } as never)
   expect(w.rec().hidden).toBe(false)
   expect(w.pane).toMatchObject({ up: true, placed: true })
+})
+
+test('a slash command is not the chat\'s first prompt', async ($, on) => {
+  const w = world(on, [
+    { role: 'user', text: '<command-name>/reload-plugins</command-name>\n<command-message>reload-plugins</command-message>', toolUses: [] },
+    { role: 'user', text: '<local-command-stdout>Reloaded</local-command-stdout>', toolUses: [] },
+    { role: 'user', text: 'fix the login bug', toolUses: [] },
+  ])
+  w.files[FILE] = JSON.stringify({ owner: 'wK:p2' })
+  await $.command.run({ command: 'diagram', args: 'map' } as never)
+  const ui = await $.ui.mount({ plugin: 'diagram-pane', surface: 'terminal', component: 'Pane', requestId: 'diagrams', props: { title: 'Diagrams', isFocused: true, bodyColumns: 70, placement: 'dock' } as never })
+  expect(await ui.find({ type: 'Text', text: /started with: fix the login bug/ } as never)).toBeDefined()
 })
