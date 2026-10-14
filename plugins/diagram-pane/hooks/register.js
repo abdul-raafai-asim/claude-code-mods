@@ -15,6 +15,10 @@
 
 import { findDiagrams, parseMermaid, drawGraph, short } from './draw.js'
 import { adoptIds, allIds, applyOps, boxOf, carrySubs, cleanId, levelAt, setLevel, toMermaid, uniqueIds } from './graph.js'
+import {
+  TABS, W, plain, chatItems, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
+  startPanelSession, updateChain,
+} from './panel.js'
 
 const PANE = 'diagrams'
 const TOOL_GET = 'mcp__diagram-pane__diagram_get'
@@ -57,6 +61,7 @@ function startSession(id) {
   }
   const changed = S.sessionId !== id
   S.sessionId = id
+  startPanelSession(id)
   return changed
 }
 
@@ -66,11 +71,12 @@ export function register(on, options) {
   S.maxPins = Number(options?.maxPins) || 5
 
   on('session.start', async ($, e, next) => {
+    W.interactive = e.isInteractive !== false
     // Open the pane right away. Unasked, it is placed on a wide terminal (144+ columns);
     // /diagram opens it at any width.
     await $.ui.open({ id: PANE, title: 'Diagrams' })
     try {
-      await $.command.register({ name: 'diagram', description: 'Redraw the live work map in the diagram pane', argumentHint: '[force|open]' })
+      await $.command.register({ name: 'diagram', description: 'The work pane: map, diffs, GitHub and the chats in this tab', argumentHint: '[force|open|map|diffs|github|chats]' })
     } catch (err) {
       $.ui.log('could not add /diagram: ' + err.message)
     }
@@ -81,6 +87,30 @@ export function register(on, options) {
         $.ui.log(`could not add ${tool.name}: ` + err.message)
       }
     }
+    // The diffs, the GitHub state and the relative times go stale between turns
+    $.clock.every(15000, () => void tick($).catch(() => {}))
+    void tick($, true).catch(() => {})
+    return next(e)
+  })
+
+  // A file Claude writes shows in the diffs tab before the turn ends
+  on('tool.call', { tool: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] }, async ($, e, next) => {
+    const result = await next(e)
+    try {
+      W.gitDueAt = 0
+      const f = e.file_path || e.notebook_path
+      if (f && !W.touched.includes(f)) W.touched.push(f)
+      // Not awaited: the turn goes on while git runs
+      if (W.tab === 'diffs' || !W.git) void refreshGit($).then(() => redraw($)).catch(() => {})
+    } catch {}
+    return result
+  }).catch(($, e, next) => next(e))
+
+  // The tab's chain records how each chat ended
+  on('session.end', async ($, e, next) => {
+    try {
+      if (W.sessionId === e.sessionId) await updateChain($, { ended: e.reason === 'prompt_input_exit' ? 'exit' : e.reason })
+    } catch {}
     return next(e)
   })
 
@@ -92,11 +122,23 @@ export function register(on, options) {
     S.sinceMap += 1
     if (S.pins.length && !(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: 'Diagrams' })
     S.every = Number(await $.env.get('DIAGRAM_PANE_EVERY')) || every
+    const waitSync = await $.env.get("DIAGRAM_PANE_SYNC")
     if (S.sinceMap >= S.every || overdue()) {
       const work = overdue() ? catchUp($, messages) : refreshMap($, messages, false)
       // Headless runs exit when the hook returns, so tests can ask us to wait
-      if (await $.env.get('DIAGRAM_PANE_SYNC')) await work
+      if (waitSync) await work
     }
+    // The other tabs: git now, gh soon after a push, the chain every turn
+    const pushed = messages.slice(-30).some(m => (m.toolUses || []).some(t => t.tool === 'Bash' && /\bgit push\b|\bgh pr (create|merge|ready)\b/.test(String(t.input?.command || ''))))
+    if (pushed) W.ghDueAt = 0
+    const panel = (async () => {
+      await readContext($)
+      await refreshGit($)
+      await updateChain($, { turns: S.turn })
+      await redraw($)
+      await tick($)
+    })().catch(err => $.ui.log('diagram-pane: ' + err.message, { to: 'debug' }))
+    if (waitSync) await panel
     await redraw($)
     return result
   })
@@ -105,8 +147,16 @@ export function register(on, options) {
   // from scratch; /diagram open gives the pane the keyboard, so number keys work
   on('command.run', { command: 'diagram' }, async ($, e) => {
     const arg = e.args.trim()
-    await $.ui.open({ id: PANE, title: 'Diagrams', ...(arg === 'open' ? { focus: true } : {}) })
+    const tab = TABS.find(t => t.id === arg || (arg === 'diff' && t.id === 'diffs') || (arg === 'gh' && t.id === 'github'))
+    await $.ui.open({ id: PANE, title: 'Diagrams', ...(arg === 'open' || tab ? { focus: true } : {}) })
     const messages = await sync($)
+    if (tab) {
+      W.tab = tab.id
+      await saveSaved($)
+      await redraw($)
+      void tick($, true).catch(() => {})
+      return {}
+    }
     if (arg === 'open') {
       await redraw($)
       return {}
@@ -140,19 +190,21 @@ export function register(on, options) {
 
   // The pane itself: lines of Text, rows of Buttons, and one Input
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
-    const items = paneItems(Math.max(30, e.props.bodyColumns || 60), actions($))
+    const { Box, Text, Button, Input, Code, Link } = $.ui.resolve(e)
+    const items = paneItems(Math.max(30, e.props.bodyColumns || 60), actions($), await $.clock.now())
     return h(Box, { flexDirection: 'column' }, ...items.map(it => {
       if (it.input) return h(Input, it.input)
+      if (it.code) return h(Code, { format: 'diff', source: it.code.source, path: it.code.path })
+      if (it.link) return Link ? h(Link, { href: it.link.href, label: it.link.label }) : h(Text, { color: 'blue', wrap: 'truncate-end' }, it.link.label)
       if (it.buttons) {
-        return h(Box, { flexDirection: 'row', flexWrap: 'wrap', columnGap: 2 },
-          ...(it.lead ? [h(Text, { bold: true, wrap: 'truncate-end' }, it.lead)] : []),
+        return h(Box, { flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, ...(it.indent ? { paddingLeft: it.indent } : {}) },
+          ...(it.lead ? [h(Text, { bold: true, wrap: 'truncate-end' }, textOnly(it.lead))] : []),
           ...it.buttons.map(b => h(Button, {
-            key: b.key, label: b.label, onPress: b.onPress,
-            ...(b.hotkey ? { hotkey: b.hotkey, plain: true } : {}),
+            key: b.key, label: textOnly(b.label), onPress: b.onPress,
+            ...(b.hotkey ? { hotkey: b.hotkey, plain: true } : b.plain ? { plain: true } : {}),
           })))
       }
-      return h(Text, { color: it.color, bold: it.bold, dimColor: it.dim, wrap: 'truncate-end' }, it.text || ' ')
+      return h(Text, { color: it.color, bold: it.bold, dimColor: it.dim, wrap: it.wrap ? 'wrap' : 'truncate-end' }, textOnly(it.text) || ' ')
     }))
   })
 }
@@ -173,6 +225,7 @@ async function sync($) {
   const fresh = startSession(await $.session.id())
   const messages = await $.session.messages()
   S.turn = turnsIn(messages)
+  readMessages(messages, await $.session.cwd().catch(() => ""))
   await loadSaved($)
   pinNewDiagrams(messages, S.maxPins)
   if (fresh) await redraw($)
@@ -218,10 +271,12 @@ const SIDE = '[diagram-pane side request: not from the user. Do not continue the
 
 const JSON_SHAPE = `{"title":"what it is, max 40 chars","nodes":[{"id":"a","label":"max 20 chars","kind":"file|component|step","now":false}],"edges":[{"from":"a","to":"b","label":"optional, max 10 chars"}]}`
 
+const MAP_SHAPE = JSON_SHAPE.replace('{"title"', '{"summary":"two plain sentences for the user: what this chat is for, and where it stands now","title"')
+
 const FORK_PROMPT = `${SIDE}
 Draw a compact map of the work in this session right now: the files, components and steps involved, and how they connect.
 Reply with ONLY one JSON object, no prose and no code fence:
-${JSON_SHAPE}
+${MAP_SHAPE}
 Map the task, not the chat: steps are steps of the work ("add discount", "run tests"), never "read files" or "explain".
 Rules: 3 to 8 nodes. Edges point from earlier to later, or from caller to callee, so the map reads top to bottom. At most 10 edges. Use file basenames as file labels. Set "now": true on the one node being worked on at this moment.`
 
@@ -288,10 +343,15 @@ async function refreshMap($, messages, force) {
     // from the map as it is now, so a box opened while the fork ran keeps its detail
     const now = force ? null : S.map
     const graph = uniqueIds(now ? carrySubs(now.graph, map.graph, { sameLabel: true }) : map.graph)
-    S.map = { title: map.title, graph, turn: S.turn, edited: Boolean(now?.edited) }
+    S.map = { title: map.title, graph, turn: S.turn, edited: Boolean(now?.edited), summary: map.summary || now?.summary || '' }
     S.mapAt = messages.length
     S.note = `map drawn at turn ${S.turn}`
     await saveSaved($)
+    // The chat's own summary goes to the tab's chain, and the chain's line follows it
+    if (map.summary) {
+      await updateChain($, { summary: map.summary, title: map.title }).catch(() => {})
+      void refreshOverall($).then(() => redraw($)).catch(() => {})
+    }
   } catch (err) {
     if (gen === S.gen) S.note = 'map error: ' + err.message
   } finally {
@@ -311,7 +371,8 @@ export function parseMap(text) {
       ...(n.now ? { now: true } : {}),
     }))
     const edges = (json.edges || []).slice(0, 14).map(e => ({ from: cleanId(e.from), to: cleanId(e.to), label: short(e.label || '', 10) }))
-    return nodes.length ? { title: short(json.title || 'the work', 50), graph: { nodes, edges } } : null
+    const summary = typeof json.summary === 'string' ? short(plain(json.summary), 400) : ''
+    return nodes.length ? { title: short(json.title || 'the work', 50), graph: { nodes, edges }, ...(summary ? { summary } : {}) } : null
   } catch {
     return null
   }
@@ -327,6 +388,7 @@ async function loadSaved($) {
   if (saved.map) Object.assign(S, { map: saved.map, mapAt: saved.mapAt || 0, note: `map from turn ${saved.map.turn}` })
   if (saved.edits) S.edits = saved.edits
   if (saved.view) S.view = saved.view
+  if (TABS.some(t => t.id === saved.tab)) W.tab = saved.tab
 }
 
 async function saveSaved($) {
@@ -334,7 +396,7 @@ async function saveSaved($) {
   const maps = (await $.store.get('maps')) || {}
   // Edits of pins that fell off the pane are no longer needed
   const edits = Object.fromEntries(Object.entries(S.edits).filter(([code]) => pinOf(code)))
-  maps[S.sessionId] = { map: S.map, mapAt: S.mapAt, edits, view: S.view, at: await $.clock.now() }
+  maps[S.sessionId] = { map: S.map, mapAt: S.mapAt, edits, view: S.view, tab: W.tab, at: await $.clock.now() }
   // Keep the 20 newest sessions only
   const keep = Object.entries(maps).sort((a, b) => b[1].at - a[1].at).slice(0, 20)
   await $.store.set('maps', Object.fromEntries(keep))
@@ -422,6 +484,31 @@ function actions($) {
     edit: text => editByFork($, text),
     // A surface that cannot move the focus leaves the field to Tab or a click
     typeChange: () => $.ui.focus({ requestId: PANE, key: inputKey() }).catch(() => {}),
+    tab: async id => {
+      W.tab = id
+      await redraw($)
+      await saveSaved($)
+      if (id !== 'map') await tick($, true).catch(() => {})
+    },
+    openFile: async path => {
+      W.openFile = path
+      await redraw($)
+    },
+    diffMode: async () => {
+      W.diffMode = W.diffMode === 'branch' ? 'head' : 'branch'
+      W.openFile = null
+      await refreshGit($)
+      await redraw($)
+    },
+    refresh: async () => {
+      if (W.tab === 'github') await refreshGh($)
+      else await refreshGit($)
+      await redraw($)
+    },
+    copy: async text => {
+      const r = await $.ui.copy({ text })
+      $.ui.toast(r.isCopied ? 'Copied: ' + text : 'Could not copy: ' + text)
+    },
   }
 }
 
@@ -632,6 +719,7 @@ function commitRoot(view, graph, { edited = false, title }) {
       graph,
       turn: S.map?.turn ?? S.turn,
       edited: Boolean(S.map?.edited || edited),
+      summary: S.map?.summary || '',
     }
     if (edited) S.mapEdits += 1
     return
@@ -734,7 +822,15 @@ function hash(text) {
 }
 
 // Items of { text, color, bold, dim }, { buttons, lead? } or { input }, cut to `w` columns
-function paneItems(w, act) {
+function paneItems(w, act, now = Date.now()) {
+  const head = headItems(w, act, S.map?.summary)
+  if (W.tab === 'diffs') return [...head, ...diffItems(w, act, now)]
+  if (W.tab === 'github') return [...head, ...githubItems(w, act, now)]
+  if (W.tab === 'chats') return [...head, ...chatItems(w, act, now)]
+  return [...head, ...mapItems(w, act)]
+}
+
+function mapItems(w, act) {
   normalizeView()
   const out = []
   const add = (text, style = {}) => out.push({ text, ...style })
@@ -801,9 +897,11 @@ function paneItems(w, act) {
 }
 
 // The pane as plain text: what tests and DIAGRAM_PANE_DUMP read
-export function paneText(w = 60) {
-  return paneItems(w, null).map(it => {
+export function paneText(w = 60, now = Date.now()) {
+  return paneItems(w, null, now).map(it => {
     if (it.input) return `> ${it.input.placeholder}`
+    if (it.code) return it.code.source
+    if (it.link) return it.link.label
     if (it.buttons) return [it.lead, ...it.buttons.map(b => (b.hotkey ? `${b.hotkey}: ${b.label}` : `[ ${b.label} ]`))].filter(Boolean).join('  ')
     return it.text
   }).join('\n')
@@ -811,6 +909,26 @@ export function paneText(w = 60) {
 
 function spread(left, right, w) {
   return right ? left + ' '.repeat(Math.max(1, w - left.length - right.length)) + right : left
+}
+
+// A Text takes no control characters: escapes go, the rest become spaces
+// eslint-disable-next-line no-control-regex
+const textOnly = text => String(text ?? '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ' ')
+
+// Every 15 seconds while the pane is open: git while the diffs tab shows (else
+// each minute), gh when it is due (sooner while CI runs), and the times redrawn
+async function tick($, force = false) {
+  // A /clear starts a new session with no event of its own until its first turn ends
+  if (!S.sessionId || S.sessionId !== (await $.session.id())) await sync($)
+  if (!force && !(await $.ui.panes()).some(p => p.id === PANE)) return
+  const now = await $.clock.now()
+  if (force || W.tab === 'diffs' || now >= W.gitDueAt) {
+    W.gitDueAt = now + 60000
+    await refreshGit($)
+  }
+  if ((force && W.tab === 'github') || now >= W.ghDueAt) await refreshGh($)
+  if (force && W.tab === 'chats') await updateChain($, { turns: S.turn })
+  await redraw($)
 }
 
 // Ask for a redraw, and in tests also write the pane's text to a file

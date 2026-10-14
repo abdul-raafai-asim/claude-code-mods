@@ -33,8 +33,8 @@
     {
       "name": "diagram-pane",
       "source": "./plugins/diagram-pane",
-      "description": "A side pane that pins every diagram Claude draws, keeps a live map of the work, and lets you go into boxes and change them",
-      "version": "0.2.4",
+      "description": "A side pane with the live work map and pinned diagrams, plus tabs for diffs, the PR and its CI, and every chat this terminal tab has held",
+      "version": "0.3.0",
       "author": {
         "name": "Ray Amjad"
       },

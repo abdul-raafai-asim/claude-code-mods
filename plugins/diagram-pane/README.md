@@ -14,6 +14,18 @@ Claude explains things with mermaid charts, but in a terminal you only see the r
 
 Claude sees the pane only through those two tools.
 
+### The other tabs
+
+The pane has four tabs: `m` map (everything above), `d` diffs, `g` github, `s` chats. Every tab starts with the same strip: branch, PR, CI, how many files changed, how full the context is. Under it is a line saying what this chat is for and where it stands. That line is written by the same fork that draws the map, so it costs nothing extra.
+
+- **Diffs.** Every file changed since the branch left `main` (`v` switches to uncommitted changes only). Each row shows the file's status, `+added −removed`, and how long ago it was last written. `✎` marks files Claude wrote in this session. Press a number to open that file's diff, then `n` / `p` for the next or previous file and `b` to go back to the list. The diff is drawn with Claude Code's own diff colors. The list refreshes as Claude edits files, not only when the turn ends.
+- **GitHub.** The branch's PR: title, link, review decision and reviewers, merge state, and the CI checks tallied (`✓ passed ✗ failing … running`), with every failing or running check named. It also shows how far the branch is ahead of or behind upstream, and the latest workflow runs on the branch. It reads from `gh` every 3 minutes, every 45 seconds while checks run, and right after Claude runs `git push` or `gh pr create`.
+- **Chats.** Every chat this terminal tab has held, newest first. A `/clear`, a handoff or a fresh `claude` in the same tab adds a row. Each row shows when the chat ran, its turns, how full its context got, how it ended, its branch and its summary. A chat that started from another's `HANDOFF-xxxxxxxx.md` note (as cache-clock writes them) is linked to that chat. Once there are two or more chats, a Haiku call writes one overall line for the whole chain. `copy resume command` copies `claude --resume <id>` for an older chat.
+
+"This tab" is the first of these that is set: `HERDR_TAB_ID`, `TMUX_PANE`, `ZELLIJ_PANE_ID`, `WEZTERM_PANE`, `KITTY_WINDOW_ID`, `ITERM_SESSION_ID`, `TERM_SESSION_ID`. With none of them set, the project folder stands in for the tab. A tab used for another project, or left idle for a day, starts a new chain. `-p` runs read the chain but are never added to it.
+
+The diffs and GitHub tabs work in the git repository of the file Claude wrote last, or else of the session's folder. A session started above its repositories still shows the right one.
+
 ![A mermaid chart in Claude's reply on the left, the same chart drawn as boxes and arrows in the pane on the right](images/pinned.png)
 
 ![A plain question: the Haiku gate says the work kept its shape, so the map stays and no fork runs](images/gate.png)
@@ -23,17 +35,18 @@ Claude sees the pane only through those two tools.
 ## Install
 
 ```
-claude plugin marketplace add ray-amjad/claude-code-mods
+claude plugin marketplace add abdul-raafai-asim/claude-code-mods
 claude plugin install diagram-pane@claude-code-mods
 ```
 
-Or inside Claude Code: `/plugin marketplace add ray-amjad/claude-code-mods`, then `/plugin install diagram-pane@claude-code-mods`.
+Or inside Claude Code: `/plugin marketplace add abdul-raafai-asim/claude-code-mods`, then `/plugin install diagram-pane@claude-code-mods`.
 
 The pane opens on its own in a terminal 144 columns or wider. Narrower than that, type `/diagram` once and it opens at any width. With fullscreen rendering it docks beside the transcript; in the classic renderer it sits above the prompt.
 
 ## Usage
 
 - Ask for a diagram (`explain the checkout flow with a mermaid flowchart`) and it is pinned when the turn ends.
+- `/diagram diffs`, `/diagram github`, `/diagram chats`, `/diagram map` open the pane on that tab, with the keyboard.
 - `/diagram` runs the gate now and redraws the map if the work changed. `/diagram force` skips the gate and draws the map from scratch, dropping edits.
 - `/diagram open` gives the pane the keyboard, so number keys work at once. Clicking the pane, or ctrl+x tab, does the same; Esc hands the keys back to the prompt.
 - Ask Claude to change what you are looking at: "add the NAT gateway to the network box", "move the cache under the API layer". It calls `diagram_get`, then `diagram_set`, and the pane shows the changed level.
@@ -51,6 +64,8 @@ The pane opens on its own in a terminal 144 columns or wider. Narrower than that
 - On `turn.complete` it reads the transcript (`$.session.messages()`) and pins any new mermaid or ASCII diagram it finds in Claude's replies.
 - Every N turns the gate runs: `$.model.complete` on Haiku with the current map, the files touched since that are not on it, and a digest of tool calls. It answers YES or NO.
 - On YES, `$.model.fork` asks the session itself for `{ title, nodes, edges }` as JSON. A fork sees the whole conversation but cannot call tools, so it is cheap and served mostly from the prompt cache.
+- `hooks/panel.js` runs `git` and `gh` through `$.process.run` and lays out the diffs, github and chats tabs; `hooks/work.js` holds the parsers (numstat, porcelain status, unified diff per file, check rollups, the tab's chain), with no `$`, so the tests feed it text.
+- The chain of chats is kept in `$.store` under the tab's id, read fresh and written back on every turn, so a chat in another process of the same tab adds to it rather than overwriting it.
 - `hooks/draw.js` lays out both mermaid charts and the map the same way: layers top to bottom, boxes wrapped to the pane's width, connectors drawn with box characters.
 - A box's detail is stored inside it (`sub`), so the whole map is a tree. `hooks/graph.js` walks it, patches it, and writes it back out as mermaid with each detail as a `subgraph`, which is what `diagram_get` returns.
 - Opening a box with no detail forks the session with the level it sits on and asks for the inside as the same JSON. The detail's ids are renamed where they clash with the rest of the tree, since mermaid ids are global.
@@ -70,6 +85,8 @@ The pane opens on its own in a terminal 144 columns or wider. Narrower than that
 - The map check runs after a turn ends, not while Claude is working. Before the first reply there is nothing to fork, and `/diagram` says so.
 - The map, edits and view are saved per install: moving the plugin to another marketplace or reinstalling it starts with no saved maps. A session that already has `everyTurns` turns of work gets a fresh map at its next turn or `diagram_get`, without waiting.
 - `/clear` starts the pane fresh: the old session's map, pins and view are dropped (its saved map stays under its own id for `--resume`), and a map or detail fork still running from before `/clear` is discarded.
+- The GitHub tab needs `gh` signed in. It reads only, as whichever account `gh` has active.
+- The diffs tab lists 80 files at most, and counts the lines of only the first 20 untracked files.
 - The map is the model's own summary of the work, so it can include a step such as "run tests" beside the files.
 
 ## Develop
