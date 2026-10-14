@@ -112,6 +112,26 @@ export function splitDiff(text) {
   return files
 }
 
+// `git log --format=@%ct --name-only`, newest first: path -> when a commit
+// last changed it, in ms
+export function lastCommitted(text) {
+  const out = {}
+  let at = 0
+  for (const line of String(text || '').split('\n')) {
+    if (line.startsWith('@')) at = Number(line.slice(1)) * 1000
+    else if (line && !(line in out)) out[line] = at
+  }
+  return out
+}
+
+// The hunks of one file's diff, each with the line it starts at in the new file
+export function hunksOf(diff) {
+  return String(diff || '').split(/\n(?=@@ )/).filter(h => h.startsWith('@@')).map(text => {
+    const m = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(text)
+    return { text, line: m ? Math.max(1, Number(m[1])) : 1 }
+  })
+}
+
 // ---------------------------------------------------------------------------
 // GitHub
 // ---------------------------------------------------------------------------

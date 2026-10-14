@@ -10,7 +10,7 @@
 
 import { short } from './draw.js'
 import {
-  ago, changedFiles, ciWord, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
+  ago, changedFiles, ciWord, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
 } from './work.js'
 
 export const TABS = [
@@ -37,6 +37,7 @@ export const W = {
   ctx: null,         // the context window's fill, percent
   firstPrompt: '',
   touched: [],       // files Claude wrote this session, newest last, absolute
+  fetched: {},       // base branch -> when origin's copy was last fetched
   busy: { git: false, gh: false, overall: false },
   ghDueAt: 0,
   gitDueAt: 0,
@@ -111,10 +112,19 @@ async function git($, args, timeoutMs = 15000) {
 // A repository born during the chat is compared with nothing at all
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
-export const DIFF_MODES = ['chat', 'branch', 'head']
-const MODE_NAMES = { chat: 'this chat', branch: 'whole branch', head: 'uncommitted' }
+export const DIFF_MODES = ['chat', 'pr', 'head']
+const MODE_NAMES = { chat: 'this chat', pr: 'the PR', head: 'uncommitted' }
 
-// The base the branch is compared with: where it left origin's default branch
+// origin's copy of the base branch, fetched at most every five minutes, so the
+// PR view starts where the branch left the base as it is on GitHub
+async function fetchBase($, branch) {
+  const now = await $.clock.now()
+  if (W.fetched[branch] && now - W.fetched[branch] < 300000) return
+  W.fetched[branch] = now
+  await $.process.run(['git', 'fetch', '--quiet', '--no-tags', 'origin', branch], { cwd: W.repo, timeoutMs: 20000 }).catch(() => {})
+}
+
+// What a view compares: `ref` against the working tree, or `ref` to `to` (committed only)
 async function baseOf($) {
   if (W.diffMode === 'head') return { ref: 'HEAD', label: 'uncommitted' }
   if (W.diffMode === 'chat') {
@@ -124,11 +134,17 @@ async function baseOf($) {
     const at = (await git($, ['rev-list', '-1', `--before=@${Math.floor(startedAt / 1000)}`, 'HEAD']))?.trim()
     return { ref: at || EMPTY_TREE, label: `this chat (since ${clock(startedAt).split(' ')[1]})` }
   }
+  // The PR: what the branch's commits add on top of where it last met its
+  // base. Merging or rebasing the base in moves that point, so the base's own
+  // changes never show, as on GitHub's Files changed.
+  const pr = W.gh?.pr?.state === 'OPEN' || W.gh?.pr?.state === 'MERGED' ? W.gh.pr : null
   const head = (await git($, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']))?.trim()
-  const candidates = [head, 'origin/main', 'origin/master', 'main', 'master'].filter(Boolean)
+  const wanted = pr?.baseRefName || head?.replace(/^origin\//, '') || 'main'
+  await fetchBase($, wanted)
+  const candidates = [...new Set([`origin/${wanted}`, head, 'origin/main', 'origin/master', 'main', 'master'].filter(Boolean))]
   for (const c of candidates) {
     const mb = (await git($, ['merge-base', 'HEAD', c]))?.trim()
-    if (mb) return { ref: mb, label: `since ${c.replace(/^origin\//, '')}` }
+    if (mb) return { ref: mb, to: 'HEAD', label: `${pr ? `PR #${pr.number}` : 'branch'} vs ${c.replace(/^origin\//, '')}`, committed: true }
   }
   return { ref: 'HEAD', label: 'uncommitted' }
 }
@@ -144,14 +160,19 @@ export async function refreshGit($) {
     }
     const branch = (await git($, ['rev-parse', '--abbrev-ref', 'HEAD']))?.trim() || '?'
     const base = await baseOf($)
-    const [numstat, status, nameStatus, diff, log] = await Promise.all([
-      git($, ['diff', '--numstat', '-M', base.ref]),
-      git($, ['status', '--porcelain=v1', '--untracked-files=all']),
-      git($, ['diff', '--name-status', '-M', base.ref]),
-      git($, ['diff', '-M', '--no-color', base.ref], 30000),
-      base.ref === 'HEAD' || base.ref === EMPTY_TREE ? '' : git($, ['log', '--format=%h %s', `${base.ref}..HEAD`]),
+    const range = base.to ? [base.ref, base.to] : [base.ref]
+    const hasLog = base.ref !== 'HEAD' && base.ref !== EMPTY_TREE
+    const [numstat, status, nameStatus, diff, log, dates] = await Promise.all([
+      git($, ['diff', '--numstat', '-M', ...range]),
+      // The PR view is commits only: what the working tree has on top is not in it
+      base.committed ? '' : git($, ['status', '--porcelain=v1', '--untracked-files=all']),
+      git($, ['diff', '--name-status', '-M', ...range]),
+      git($, ['diff', '-M', '--no-color', ...range], 30000),
+      hasLog ? git($, ['log', '--format=%h %s', `${base.ref}..HEAD`]) : '',
+      base.committed ? git($, ['log', '--format=@%ct', '--name-only', `${base.ref}..HEAD`]) : '',
     ])
     const commits = (log || '').split('\n').filter(Boolean)
+    const committedAt = lastCommitted(dates)
     const diffs = splitDiff(diff || '')
     // Untracked files have no diff in git: their lines are all new
     const untracked = {}
@@ -171,6 +192,11 @@ export async function refreshGit($) {
     const mine = new Set(W.touched.map(p => p.startsWith(W.repo + '/') ? p.slice(W.repo.length + 1) : null).filter(Boolean))
     await Promise.all(files.map(async f => {
       f.mine = mine.has(f.path)
+      // In the PR view a file's time is its last commit's; elsewhere, its last write
+      if (base.committed) {
+        f.mtime = committedAt[f.path] || 0
+        return
+      }
       try {
         f.mtime = (await $.fs.stat(`${W.repo}/${f.path}`)).mtimeMs
       } catch {
@@ -178,7 +204,7 @@ export async function refreshGit($) {
       }
     }))
     files.sort((a, b) => b.mtime - a.mtime)
-    W.git = { branch, baseRef: base.ref, baseLabel: base.label, files, diffs, commits, at: await $.clock.now() }
+    W.git = { branch, baseRef: base.ref, baseLabel: base.label, committed: Boolean(base.committed), files, diffs, commits, at: await $.clock.now() }
     if (W.openFile && !files.some(f => f.path === W.openFile)) W.openFile = null
   } catch (err) {
     W.git = { ...(W.git || { files: [], diffs: {} }), error: 'git: ' + err.message }
@@ -384,18 +410,32 @@ export function diffItems(w, act, now) {
     const f = g.files.find(x => x.path === W.openFile)
     const i = g.files.indexOf(f)
     add(short(`◆ ${W.openFile}`, w), { bold: true, color: 'green' })
-    add(f ? `${f.status}  +${f.add} −${f.del}  ·  ${f.mtime ? `written ${clock(f.mtime)} (${ago(f.mtime, now)} ago)` : 'gone from disk'}${f.mine ? '  ·  ✎ by Claude' : ''}` : '', { dim: true })
+    const verb = g.committed ? 'committed' : 'written'
+    add(f ? `${f.status}  +${f.add} −${f.del}  ·  ${f.mtime ? `${verb} ${clock(f.mtime)} (${ago(f.mtime, now)} ago)` : 'gone from disk'}${f.mine ? '  ·  ✎ by Claude' : ''}` : '', { dim: true })
+    const abs = `${W.repo}/${W.openFile}`
+    const parts = hunksOf(g.diffs[W.openFile])
     out.push({ buttons: [
       { key: 'back', hotkey: 'b', label: 'files', onPress: () => act?.openFile(null) },
+      ...(f?.status !== 'D' ? [{ key: 'vscode', hotkey: 'o', label: 'open in VS Code', onPress: () => act?.openInEditor(abs, parts[0]?.line || 1) }] : []),
       ...(i > 0 ? [{ key: 'prev', hotkey: 'p', label: 'prev', onPress: () => act?.openFile(g.files[i - 1].path) }] : []),
       ...(i >= 0 && i < g.files.length - 1 ? [{ key: 'next', hotkey: 'n', label: 'next', onPress: () => act?.openFile(g.files[i + 1].path) }] : []),
     ] })
-    const hunks = g.diffs[W.openFile]
     if (f?.binary) add('binary file', { dim: true })
-    else if (hunks) {
-      const { source, cut } = fitDiff(hunks)
-      if (source) out.push({ code: { source, path: W.openFile } })
-      if (cut) add(`… ${cut} more hunk${cut > 1 ? 's' : ''} not drawn: the diff is too long for the pane`, { dim: true })
+    else if (parts.length) {
+      // One block per hunk, each under a link to its line in VS Code: cmd+click it
+      let room = DIFF_ROOM
+      let cut = 0
+      for (const p of parts) {
+        const { source } = fitDiff(p.text)
+        if (!source || source.length > room) {
+          cut++
+          continue
+        }
+        room -= source.length
+        if (f?.status !== 'D') out.push({ link: { href: `vscode://file${encodeURI(abs)}:${p.line}`, label: `↗ line ${p.line}` } })
+        out.push({ code: { source, path: W.openFile } })
+      }
+      if (cut) add(`… ${cut} hunk${cut > 1 ? 's' : ''} not drawn: too long for the pane (o opens the file)`, { dim: true })
     }
     else add(f?.status === 'D' ? 'deleted' : 'no diff to show', { dim: true })
     return out
@@ -418,7 +458,7 @@ export function diffItems(w, act, now) {
   if (!g.files.length) {
     add({
       chat: 'Nothing changed in this repository since this chat started.',
-      branch: 'Nothing changed since the branch left its base: all of it is merged or pushed.',
+      pr: 'This branch has no commits of its own on top of its base yet.',
       head: 'No uncommitted changes.',
     }[W.diffMode], { dim: true, wrap: true })
     add(`v shows ${MODE_NAMES[nextMode]}.`, { dim: true })
@@ -426,12 +466,13 @@ export function diffItems(w, act, now) {
   const wide = Math.max(10, w - 26)
   g.files.forEach((f, i) => {
     const counts = f.binary ? 'bin' : `+${f.add} −${f.del}`
-    const when = f.mtime ? ago(f.mtime, now) : 'gone'
+    const when = f.mtime ? ago(f.mtime, now) : g.committed ? '' : 'gone'
     // The first nine draw as `1: label` beside their hotkey; the rest line up under them
     const label = `${i < 9 ? '' : '   '}${f.status} ${leftCut(f.path, wide).padEnd(wide)} ${counts.padStart(9)} ${when.padStart(4)}${f.mine ? ' ✎' : ''}`
     out.push({ buttons: [{ key: 'file:' + f.path, ...(i < 9 ? { hotkey: String(i + 1) } : {}), plain: true, label, onPress: () => act?.openFile(f.path) }] })
   })
-  add(`M modified A added D deleted ? new · ✎ Claude wrote it · ${g.at ? 'read ' + ago(g.at, now) + ' ago' : ''}`, { dim: true })
+  add(`M modified A added D deleted ? new · ✎ Claude wrote it · times are last ${g.committed ? 'commit' : 'write'}`, { dim: true })
+  if (g.committed) add('Full search and cmd+click: open the PR in VS Code\'s GitHub Pull Requests view.', { dim: true, wrap: true })
   return out
 }
 

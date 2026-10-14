@@ -505,6 +505,14 @@ function actions($) {
       else await refreshGit($)
       await redraw($)
     },
+    openInEditor: async (file, line) => {
+      try {
+        const r = await $.process.run(['code', '-g', `${file}:${line}`], { timeoutMs: 15000 })
+        if (r.exitCode !== 0) $.ui.toast('VS Code did not open: ' + (r.stderr.trim() || `exit ${r.exitCode}`))
+      } catch {
+        $.ui.toast('No `code` command: in VS Code run "Shell Command: Install \'code\' command in PATH"')
+      }
+    },
     copy: async text => {
       const r = await $.ui.copy({ text })
       $.ui.toast(r.isCopied ? 'Copied: ' + text : 'Could not copy: ' + text)
