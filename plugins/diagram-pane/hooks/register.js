@@ -16,7 +16,7 @@
 import { findDiagrams, parseMermaid, drawGraph, short } from './draw.js'
 import { adoptIds, allIds, applyOps, boxOf, carrySubs, cleanId, levelAt, setLevel, toMermaid, uniqueIds } from './graph.js'
 import {
-  DIFF_MODES, TABS, W, plain, chatItems, focusPane, refreshHerdr, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
+  DIFF_MODES, TABS, W, plain, chatItems, declare, focusPane, progressItems, refreshHerdr, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
   startPanelSession, updateChain,
 } from './panel.js'
 
@@ -76,7 +76,7 @@ export function register(on, options) {
     // /diagram opens it at any width.
     await $.ui.open({ id: PANE, title: 'Diagrams' })
     try {
-      await $.command.register({ name: 'diagram', description: 'The work pane: map, diffs, GitHub and the chats in this tab', argumentHint: '[force|open|map|diffs|github|chats]' })
+      await $.command.register({ name: 'diagram', description: 'The work pane: map, progress, diffs, GitHub and the chats in this tab', argumentHint: '[force|open|map|progress|diffs|github|chats]' })
     } catch (err) {
       $.ui.log('could not add /diagram: ' + err.message)
     }
@@ -165,6 +165,15 @@ export function register(on, options) {
     if (await $.env.get('DIAGRAM_PANE_SYNC')) await work
     return {}
   })
+
+  // Claude names its stage
+  on('tool.call', { tool: 'mcp__diagram-pane__progress_set' }, async ($, e) => {
+    if (!STAGE_LIST.includes(e.stage)) return { deny: `stage must be one of: ${STAGE_LIST.join(', ')}` }
+    await sync($)
+    declare({ stage: e.stage, note: plain(e.note || ''), done: e.done, total: e.total })
+    await redraw($)
+    return { result: `The progress pane shows: ${e.stage}${e.note ? ' · ' + e.note : ''}${e.total ? ` ${e.done ?? 0}/${e.total}` : ''}.` }
+  }).catch(() => ({ deny: 'progress_set failed; the pane is unchanged.' }))
 
   // Claude's way into the pane
   on('tool.call', { tool: TOOL_GET }, async $ => {
@@ -589,7 +598,28 @@ async function expand($, view) {
 // Changing a diagram: Claude's tools and the pane's own input
 // ---------------------------------------------------------------------------
 
+const STAGE_LIST = ['plan', 'implement', 'test', 'review', 'fix', 'verify', 'commit', 'push', 'pr', 'ci', 'merge']
+
 const TOOLS = [
+  {
+    name: 'progress_set',
+    description:
+      "Say which stage of the work you are in, for the user's progress pane. The pane already infers stages from your " +
+      'tool calls (edits, test commands, review agents, git and gh); call this when that would be wrong or too coarse: ' +
+      'when you start a stage the calls do not show (planning in prose, an adversarial review by hand), or to count ' +
+      'progress inside one ("fixing review findings", done 3, total 10). One short call; it changes nothing else.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        stage: { type: 'string', enum: STAGE_LIST },
+        note: { type: 'string', description: 'A few words on what is happening in this stage' },
+        done: { type: 'number', description: 'Items done in this stage, with total' },
+        total: { type: 'number', description: 'Items in this stage' },
+      },
+      required: ['stage'],
+    },
+    isDeferred: false,
+  },
   {
     name: 'diagram_get',
     description:
@@ -839,6 +869,7 @@ function paneItems(w, act, now = Date.now()) {
   if (W.tab === 'diffs') return [...head, ...diffItems(w, act, now)]
   if (W.tab === 'github') return [...head, ...githubItems(w, act, now)]
   if (W.tab === 'chats') return [...head, ...chatItems(w, act, now)]
+  if (W.tab === 'progress') return [...head, ...progressItems(w, act)]
   return [...head, ...mapItems(w, act)]
 }
 

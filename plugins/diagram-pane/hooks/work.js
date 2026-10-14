@@ -281,3 +281,103 @@ export function clock(ms) {
 export function leftCut(path, n) {
   return path.length <= n ? path : '…' + path.slice(path.length - n + 1)
 }
+
+// ---------------------------------------------------------------------------
+// Progress: which stage of the work the chat is in
+// ---------------------------------------------------------------------------
+
+export const STAGES = ['plan', 'implement', 'test', 'review', 'fix', 'verify', 'commit', 'push', 'pr', 'ci', 'merge']
+
+const EDITS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+const TEST_RE = /(\bpytest\b|\bjest\b|\bvitest\b|\bmocha\b|\brspec\b|\bgo test\b|\bcargo test\b|\b(npm|pnpm|yarn|bun)( run)? test\b|\bplugin test\b|\bmake test\b|\btox\b|\bphpunit\b|\bplaywright test\b|\bunittest\b)/
+const SHELL_EDIT_RE = /\bsed -i\b|\bpython3? - <<|\bcat >+ |\btee \b|\bpatch -p/
+const REVIEW_RE = /\b(review|audit|adversarial|critique|find (the )?bugs|verify (the )?findings)\b/i
+
+// One signal from a tool call: { stage, note } or null. `after` says what has
+// happened before it, since an edit after a review is a fix and a test after
+// a fix is a verify.
+function signalOf(t, after) {
+  const i = t.input || {}
+  if (t.tool === 'mcp__diagram-pane__progress_set' && STAGES.includes(i.stage)) {
+    const of = i.total ? ` ${i.done ?? 0}/${i.total}` : ''
+    return { stage: i.stage, note: (i.note || '') + of, declared: true }
+  }
+  if (['ExitPlanMode', 'EnterPlanMode', 'TodoWrite'].includes(t.tool)) return { stage: 'plan', note: t.tool }
+  if (EDITS.includes(t.tool)) {
+    return { stage: after.has('review') ? 'fix' : 'implement', file: String(i.file_path || i.notebook_path || '') }
+  }
+  if (['Agent', 'Task'].includes(t.tool)) {
+    if (i.subagent_type === 'Plan') return { stage: 'plan', note: i.description || 'Plan agent' }
+    if (REVIEW_RE.test(`${i.description || ''} ${i.prompt || ''}`.slice(0, 2000))) return { stage: 'review', note: i.description || 'review agent' }
+    return null
+  }
+  if (t.tool === 'Skill' && /review/.test(String(i.skill || ''))) return { stage: 'review', note: '/' + i.skill }
+  if (t.tool !== 'Bash') return null
+  const cmd = String(i.command || '')
+  if (/\bgh pr merge\b/.test(cmd)) return { stage: 'merge', note: 'gh pr merge' }
+  if (/\bgh pr create\b/.test(cmd)) return { stage: 'pr', note: 'gh pr create' }
+  if (/\bgit push\b/.test(cmd)) return { stage: 'push', note: t.isError ? 'failed' : '' }
+  if (/\bgit commit\b/.test(cmd)) {
+    const m = /-m\s+(["'])(.*?)\1/.exec(cmd) || /\n([^\n]{4,})\n/.exec(cmd.split('<<')[1] || '')
+    return { stage: 'commit', note: m ? (m[2] || m[1]).split('\n')[0] : '' }
+  }
+  if (TEST_RE.test(cmd)) return { stage: after.has('fix') ? 'verify' : 'test', note: (TEST_RE.exec(cmd)[0]) + (t.isError ? ' · failed' : ' · passed'), failed: Boolean(t.isError) }
+  if (SHELL_EDIT_RE.test(cmd)) return { stage: after.has('review') ? 'fix' : 'implement' }
+  return null
+}
+
+// The stages as the transcript shows them: { stages: { name -> { turn, last,
+// note, files, failed } }, now, declared }. CI and merge come from the PR.
+export function progressFrom(messages, { pr, checks, seed } = {}) {
+  const stages = {}
+  let now = null
+  let declared = null
+  let turn = 0
+  const after = new Set()
+  for (const m of messages || []) {
+    if (m.role === 'user' && m.text && !m.toolResults?.length) turn++
+    for (const t of m.toolUses || []) {
+      const sig = signalOf(t, after)
+      if (!sig) continue
+      const s = (stages[sig.stage] ||= { turn, files: [] })
+      s.last = turn
+      if (sig.note) s.note = sig.note
+      if (sig.file && !s.files.includes(sig.file)) s.files.push(sig.file)
+      if ('failed' in sig) s.failed = sig.failed
+      after.add(sig.stage)
+      now = sig.stage
+      declared = sig.declared ? sig.note : null
+    }
+  }
+  if (pr) {
+    if (!stages.pr) stages.pr = { turn: null, files: [], note: `#${pr.number}` }
+    if (checks && checks.pass + checks.fail + checks.pending > 0) {
+      stages.ci = { turn: null, files: [], note: checks.fail ? `${checks.fail} failing` : checks.pending ? `${checks.pending} running` : `${checks.pass} passed`, failed: checks.fail > 0, running: checks.pending > 0 }
+      // Once pushed, the work waits on CI; a later fix or test is the work again
+      if (STAGES.indexOf(now) >= STAGES.indexOf('push')) now = 'ci'
+    }
+    if (pr.state === 'MERGED') {
+      stages.merge = { turn: stages.merge?.turn ?? null, files: [], note: 'merged' }
+      now = 'merge'
+    }
+  }
+  // A chat that came from a handoff starts where the one before it stood
+  if (seed?.stages) {
+    for (const [name, s] of Object.entries(seed.stages)) if (!stages[name]) stages[name] = { ...s, inherited: true }
+    if (!now) now = seed.now
+  }
+  return { stages, now, declared }
+}
+
+// Each stage's mark: ✓ done, ▶ now, ✗ failed, – skipped, · not yet
+export function stageRows(p) {
+  const at = STAGES.indexOf(p.now)
+  return STAGES.map((name, i) => {
+    const s = p.stages[name]
+    let mark = '·'
+    if (name === p.now) mark = s?.failed ? '✗' : '▶'
+    else if (s) mark = s.failed ? '✗' : '✓'
+    else if (i < at) mark = '–'
+    return { name, mark, ...(s || {}) }
+  })
+}

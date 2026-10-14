@@ -12,12 +12,19 @@ Claude explains things with mermaid charts, but in a terminal you only see the r
 - **Change a diagram.** Press `c` (or Tab to the field) and type a change into the field under a diagram ("split auth into login and token refresh") and a fork redraws it. Or ask Claude: it reads and edits the pane with two tools, `diagram_get` and `diagram_set`.
 - Square boxes are files, round ones components, double ones steps or decisions.
 
-Claude sees the pane only through those two tools.
+Claude sees the pane only through those two tools, plus `progress_set` for the progress tab.
 
 ### The other tabs
 
-The pane has four tabs: `m` map (everything above), `d` diffs, `g` github, `s` chats. Every tab starts with the same strip: branch, PR, CI, how many files changed, how full the context is. Under it is a line saying what this chat is for and where it stands. That line is written by the same fork that draws the map, so it costs nothing extra.
+The pane has five tabs: `m` map (everything above), `w` progress, `d` diffs, `g` github, `s` chats. Every tab starts with the same strip: branch, PR, CI, how many files changed, how full the context is. Under it is a line saying what this chat is for and where it stands. That line is written by the same fork that draws the map, so it costs nothing extra.
 
+- **Progress.** Where the work stands, as stages: plan → implement → test → review → fix → verify → commit → push → PR → CI → merge. Each stage shows `✓` done, `▶` now, `✗` failed, `–` skipped or `·` not yet, with the turn it happened in and what marked it. The stages come from what Claude ran, so they cost nothing to track:
+  - `TodoWrite` or plan mode is plan, and file edits are implement;
+  - a test command (`npm test`, `pytest`, `go test`, `claude plugin test`, …) is test, and its exit code is pass or fail;
+  - a review subagent or `/code-review` is review, an edit after it is fix, and a test after that is verify;
+  - `git commit`, `git push`, `gh pr create` and `gh pr merge` are their own stages, and CI and merge come from the GitHub tab.
+
+  Claude can also name a stage with the `progress_set` tool ("fixing review findings 3/10"). A chat that came from a handoff starts where the chat before it stood. The current stage also shows in the strip on every tab, and next to each chat in the chats tab.
 - **Diffs.** What this chat changed: every file that differs from the commit HEAD was on when the chat started, committed since or not, and the commits made since then are listed above the files. `v` cycles through three views: this chat, **the PR**, and uncommitted changes only.
 
   The PR view is what GitHub's Files changed shows: the branch's commits on top of the point where it last met the PR's base. That base is fetched from origin at most every five minutes. Merging or rebasing `main` into the branch moves that point forward, so main's own changes never show. Times in this view are each file's last commit.

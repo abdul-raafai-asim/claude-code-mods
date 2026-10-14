@@ -10,11 +10,12 @@
 
 import { short } from './draw.js'
 import {
-  STATUS_MARK, ago, changedFiles, ciWord, herdrPanes, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
+  STAGES, STATUS_MARK, ago, progressFrom, stageRows, changedFiles, ciWord, herdrPanes, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
 } from './work.js'
 
 export const TABS = [
   { id: 'map', hotkey: 'm', label: 'map' },
+  { id: 'progress', hotkey: 'w', label: 'progress' },
   { id: 'diffs', hotkey: 'd', label: 'diffs' },
   { id: 'github', hotkey: 'g', label: 'github' },
   { id: 'chats', hotkey: 's', label: 'chats' },
@@ -39,6 +40,8 @@ export const W = {
   touched: [],       // files Claude wrote this session, newest last, absolute
   fetched: {},       // base branch -> when origin's copy was last fetched
   herdr: null,       // { bin, workspace, pane, tab, label, panes, at, error }: the tab's live panes
+  msgs: [],          // the transcript as last read, for the progress tab
+  declared: null,    // { input, seen }: the last progress_set, until the transcript holds it
   busy: { git: false, gh: false, overall: false },
   ghDueAt: 0,
   gitDueAt: 0,
@@ -91,6 +94,7 @@ export function readMessages(messages, cwd) {
     }
   }
   W.touched = touched
+  W.msgs = messages
   const first = messages.find(m => m.role === 'user' && m.text && !m.toolResults?.length)
   W.firstPrompt = first ? plain(first.text) : ''
 }
@@ -315,6 +319,7 @@ async function writeChain($, fields) {
     ...(W.git?.branch ? { branch: W.git.branch } : {}),
     ...(W.firstPrompt ? { firstPrompt: short(W.firstPrompt, 200) } : {}),
     ...(W.ctx !== null ? { ctx: W.ctx } : {}),
+    ...progressRow(),
     ...fields,
   }
   // Once the session has a first prompt: did it start from an earlier one's handoff?
@@ -399,6 +404,62 @@ export async function focusPane($, pane) {
   return r.exitCode === 0 ? null : (r.stderr.trim().split('\n')[0] || `exit ${r.exitCode}`)
 }
 
+// ---------------------------------------------------------------------------
+// Progress
+// ---------------------------------------------------------------------------
+
+const PROGRESS_TOOL = 'mcp__diagram-pane__progress_set'
+const declaredIn = msgs => msgs.reduce((n, m) => n + (m.toolUses || []).filter(t => t.tool === PROGRESS_TOOL).length, 0)
+
+// Claude's progress_set lands at once, before the transcript holds the call
+export function declare(input) {
+  W.declared = { input, seen: declareCount() }
+}
+const declareCount = () => declaredIn(W.msgs)
+
+// The chat's progress: the transcript's signals, the PR's CI and merge, and,
+// for a chat that came from a handoff, where the chat before it stood
+export function progress() {
+  let msgs = W.msgs
+  if (W.declared && declareCount() <= W.declared.seen) {
+    msgs = [...msgs, { role: 'assistant', text: '', toolUses: [{ tool: PROGRESS_TOOL, input: W.declared.input }] }]
+  }
+  const row = W.chain?.sessions?.find(s => s.id === W.sessionId)
+  const from = row?.from && W.chain.sessions.find(s => s.id === row.from)
+  return progressFrom(msgs, { pr: W.gh?.pr, checks: W.gh?.checks, seed: from?.progress })
+}
+
+// What the chain keeps of it: the stage and each stage's turn and note
+function progressRow() {
+  const p = progress()
+  if (!p.now) return {}
+  const stages = Object.fromEntries(Object.entries(p.stages).map(([k, s]) => [k, { turn: s.turn, note: s.note || (s.files?.length ? `${s.files.length} files` : ''), failed: s.failed }]))
+  return { progress: { now: p.now, stages } }
+}
+
+export function progressItems(w, act) {
+  const out = []
+  const add = (text, style = {}) => out.push({ text, ...style })
+  const p = progress()
+  add(spread('◆ PROGRESS', p.now ? `now: ${p.now}` : '', w), { bold: true, color: 'yellow' })
+  if (!p.now) add('Nothing to place yet: the stages fill in as Claude plans, edits, tests, reviews, commits and pushes.', { dim: true, wrap: true })
+  for (const r of stageRows(p)) {
+    const isNow = r.mark === '▶' || (r.name === p.now)
+    const when = r.inherited ? 'prev chat' : r.turn != null ? `turn ${r.turn}` : ''
+    const what = r.note || (r.files?.length ? `${r.files.length} file${r.files.length > 1 ? 's' : ''}` : '')
+    add(short(`${r.mark} ${r.name.padEnd(10)} ${when.padEnd(9)} ${what}`, w), {
+      bold: isNow,
+      color: r.mark === '✗' ? 'red' : isNow ? 'yellow' : r.mark === '✓' ? 'green' : undefined,
+      dim: r.mark === '·' || r.mark === '–' || r.inherited,
+    })
+  }
+  if (p.declared) add('Claude: ' + p.declared, { wrap: true, color: 'yellow' })
+  add('')
+  add('✓ done  ▶ now  ✗ failed  – skipped  · not yet', { dim: true })
+  add('Stages come from what Claude ran: edits, test commands, review agents, git and gh, and the PR\'s CI. Claude can name a stage itself with progress_set.', { dim: true, wrap: true })
+  return out
+}
+
 export async function readContext($) {
   try {
     const { context } = await $.session.usage()
@@ -429,6 +490,8 @@ export function headItems(w, act, summary) {
 
 function strip() {
   const parts = []
+  const p = progress()
+  if (p.now) parts.push('▶ ' + p.now)
   if (W.git?.branch) parts.push('⎇ ' + W.git.branch)
   if (W.gh) {
     parts.push(prWord(W.gh.pr))
@@ -601,6 +664,7 @@ export function chatItems(w, act, now) {
     const facts = [
       s.turns ? `${s.turns} turns` : '',
       s.ctx != null ? `ctx ${s.ctx}%` : '',
+      s.progress?.now ? `▶ ${s.progress.now}` : '',
       s.branch ? `⎇ ${s.branch}` : '',
       s.ended ? `ended (${s.ended})` : '',
     ].filter(Boolean).join(' · ')

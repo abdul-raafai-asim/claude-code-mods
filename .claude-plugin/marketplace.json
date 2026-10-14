@@ -33,8 +33,8 @@
     {
       "name": "diagram-pane",
       "source": "./plugins/diagram-pane",
-      "description": "A side pane with the live work map and pinned diagrams, plus tabs for diffs, the PR and its CI, and every chat this terminal tab has held",
-      "version": "0.3.1",
+      "description": "A side pane with the live work map and pinned diagrams, plus tabs for progress, diffs, the PR and its CI, and every chat this terminal tab has held",
+      "version": "0.4.0",
       "author": {
         "name": "Ray Amjad"
       },

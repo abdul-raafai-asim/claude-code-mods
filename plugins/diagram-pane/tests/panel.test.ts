@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import {
-  ciWord, changedFiles, parseNameStatus, handoffFrom, joinChain, parseNumstat, renamedTo, splitDiff, tabIdFrom, tallyChecks,
+  ciWord, changedFiles, parseNameStatus, progressFrom, stageRows, handoffFrom, joinChain, parseNumstat, renamedTo, splitDiff, tabIdFrom, tallyChecks,
 } from '../hooks/work.js'
 import { fitDiff, plain } from '../hooks/panel.js'
 
@@ -144,7 +144,7 @@ test('the diffs tab lists the changed files and opens one as a diff', async ($, 
   world(on)
   await $.command.run({ command: 'diagram', args: 'diffs' } as never)
   const ui = await mount($)
-  await has(ui, /⎇ feat\/discount · PR #42 open · CI ✗ 1 failing · 3 files \+4 −2/)
+  await has(ui, /▶ implement · ⎇ feat\/discount · PR #42 open · CI ✗ 1 failing/)
   await has(ui, /DIFFS this chat \(since/)
   await has(ui, /1 commit in this range/)
   await ui.press({ key: 'mode' } as never)
@@ -213,4 +213,53 @@ test('the oldest of a tab\'s chain stays when a later chat starts in the same pr
   let c = joinChain(null, { id: 'a', root: '/home' }, 1000)
   c = joinChain(c, { id: 'b', root: '/home' }, 2000)
   expect(c.sessions.length).toBe(2)
+})
+
+const use = (tool: string, input: Record<string, unknown>, isError = false) => ({ role: 'assistant', text: '', toolUses: [{ tool, input, isError }] })
+const say = (text: string) => ({ role: 'user', text, toolUses: [] })
+
+test('progress follows the work: edits, tests, a review, fixes, a verify, git and CI', () => {
+  const msgs = [
+    say('add discounts'),
+    use('TodoWrite', {}),
+    use('Edit', { file_path: '/r/a.js' }),
+    use('Bash', { command: 'npm test' }, true),
+    say('review it'),
+    use('Agent', { description: 'Adversarial review of the diff', prompt: 'find bugs' }),
+    use('Edit', { file_path: '/r/a.js' }),
+    use('Bash', { command: 'npm test' }),
+    use('Bash', { command: 'git commit -m "add discounts"' }),
+    use('Bash', { command: 'git push origin feat' }),
+  ]
+  const p = progressFrom(msgs)
+  expect(p.now).toBe('push')
+  expect(stageRows(p).map(r => r.name + r.mark).join(' ')).toBe(
+    'plan✓ implement✓ test✗ review✓ fix✓ verify✓ commit✓ push▶ pr· ci· merge·')
+  expect(p.stages.commit.note).toBe('add discounts')
+  expect(p.stages.review.turn).toBe(2)
+  const withCi = progressFrom(msgs, { pr: { number: 7, state: 'OPEN' }, checks: { pass: 3, fail: 0, pending: 1, skip: 0 } })
+  expect(withCi.now).toBe('ci')
+  expect(withCi.stages.ci.note).toBe('1 running')
+})
+
+test('a stage Claude names wins, and a handed-off chat starts where the last stood', () => {
+  const p = progressFrom([say('go on'), use('mcp__diagram-pane__progress_set', { stage: 'fix', note: 'review findings', done: 3, total: 10 })],
+    { seed: { now: 'review', stages: { implement: { turn: 4 }, review: { turn: 9 } } } })
+  expect(p.now).toBe('fix')
+  expect(p.declared).toBe('review findings 3/10')
+  expect(p.stages.implement.inherited).toBe(true)
+  expect(stageRows(p).find(r => r.name === 'test')?.mark).toBe('–')
+})
+
+test('progress_set shows in the progress tab at once', async ($, on) => {
+  world(on)
+  const r = (await $.tool.call({ tool: 'mcp__diagram-pane__progress_set', stage: 'review', note: 'adversarial pass', done: 2, total: 5 } as never)) as { result?: string }
+  expect(String(r.result)).toContain('review · adversarial pass 2/5')
+  const bad = (await $.tool.call({ tool: 'mcp__diagram-pane__progress_set', stage: 'nap' } as never)) as { deny?: string }
+  expect(bad.deny).toContain('stage must be one of')
+  const ui = await mount($)
+  await ui.press({ key: 'tab:progress' } as never)
+  await has(ui, /◆ PROGRESS .*now: review/)
+  await has(ui, /Claude: adversarial pass 2\/5/)
+  await has(ui, /✓ implement/)
 })
