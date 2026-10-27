@@ -4,6 +4,8 @@
 //   github  `gh pr view` and `gh run list` into a PR line and a CI tally
 //   chats   the chain of sessions one terminal tab has held, across /clear,
 //           handoffs and restarts
+//   shots   the screenshots a conversation holds: image files its tools named,
+//           and images that came back inline (a browser tool's screenshot)
 //
 // register.js runs the commands and keeps the results; everything here is
 // pure, so the tests feed it text and read what comes back.
@@ -438,4 +440,115 @@ export function paneOwner(rec, me, live, { fresh = false } = {}) {
   const alive = Boolean(owner) && (owner === me || !live || live.some(p => p.pane === owner))
   const mine = owner === me || fresh || !alive
   return { show: mine && !rec?.hidden, claim: mine && owner !== me }
+}
+
+// A short id for a piece of text (djb2, base 36)
+export function textHash(text) {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0
+  return h.toString(36)
+}
+
+// ---------------------------------------------------------------------------
+// Screenshots
+// ---------------------------------------------------------------------------
+
+// An absolute or ~ path to an image, not inside a URL (https://x/a.png)
+const IMAGE_PATH = /(?<![\w:/.~-])(?:~\/|\/(?!\/))[^\s'"`<>()|,;*?]*\.(?:png|jpe?g|gif|webp)(?![\w.])/gi
+const IMAGE_FILE = /\.(?:png|jpe?g|gif|webp)$/i
+// Input fields a tool names its output file in, where a relative path counts too
+const PATH_FIELDS = ['file_path', 'path', 'filename', 'filePath', 'output', 'outputPath', 'savePath', 'screenshotPath']
+
+export function imagePathsIn(text) {
+  return String(text ?? '').match(IMAGE_PATH) || []
+}
+
+// Every image path a tool call names: in any string of its input, or in what it returned
+function pathsOfToolUse(use, cwd, home) {
+  const found = []
+  const visit = (value, key) => {
+    if (typeof value === 'string') {
+      found.push(...imagePathsIn(value))
+      const isRelativeFile = PATH_FIELDS.includes(key) && IMAGE_FILE.test(value) && !/^[/~]/.test(value)
+      if (isRelativeFile) found.push(`${cwd}/${value.replace(/^\.\//, '')}`)
+    } else if (Array.isArray(value)) {
+      for (const v of value) visit(v, key)
+    } else if (value && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) visit(v, k)
+    }
+  }
+  visit(use.input, '')
+  found.push(...imagePathsIn(use.text))
+  const absolute = found.map(p => (p.startsWith('~/') ? home + p.slice(1) : p))
+  return [...new Set(absolute)]
+}
+
+// What one tool use was, for the shot's caption: `Read`, `claude-in-chrome computer`
+export function toolCaption(tool) {
+  return String(tool).replace(/^mcp__/, '').replace(/__/g, ' ')
+}
+
+// The screenshots of one conversation, oldest first. `rows` is it as
+// $.session.messages() returns it, `api` as $.session.messages({ as: 'api' }).
+// Files are every image path a tool named (existence is the caller's check).
+// Inline images are image blocks in tool results, and images pasted into a
+// prompt; one a tool read from a file it named is left to that file.
+export function shotsIn(rows, api, { cwd = '', home = '', from = 'main' } = {}) {
+  const files = []
+  const pathsByUse = {}
+  for (const m of rows || []) {
+    for (const use of m.toolUses || []) {
+      const paths = pathsOfToolUse(use, cwd, home)
+      pathsByUse[use.tool_use_id] = paths
+      for (const path of paths) files.push({ kind: 'file', path, tool: use.tool, from, order: files.length })
+    }
+  }
+
+  const inline = []
+  const toolOf = {}
+  const addImage = (block, tool, from) => {
+    const data = block.source?.type === 'base64' ? String(block.source.data || '') : ''
+    if (!data) return
+    const media = String(block.source.media_type || 'image/png')
+    const id = 'i' + textHash(`${media}:${data.length}:${data.slice(0, 4096)}:${data.slice(-4096)}`)
+    inline.push({ kind: 'inline', id, media, data, tool, from, order: inline.length })
+  }
+  for (const m of api || []) {
+    if (!Array.isArray(m.content)) continue
+    for (const block of m.content) {
+      if (block.type === 'tool_use') toolOf[block.id] = block.name
+      if (block.type === 'image' && m.role === 'user') addImage(block, 'pasted', from)
+      if (block.type !== 'tool_result' || !Array.isArray(block.content)) continue
+      if (pathsByUse[block.tool_use_id]?.length) continue
+      for (const part of block.content) {
+        if (part.type === 'image') addImage(part, toolOf[block.tool_use_id] || 'tool', from)
+      }
+    }
+  }
+  return { files, inline }
+}
+
+// The Agent tool uses of a conversation that spawned an agent: its id and task
+export function agentsIn(rows) {
+  const agents = []
+  for (const m of rows || []) {
+    for (const use of m.toolUses || []) {
+      if (use.agentId) agents.push({ id: use.agentId, task: String(use.input?.description || 'subagent') })
+    }
+  }
+  return agents
+}
+
+// How many rows and columns a picture of `width` x `height` pixels takes in a
+// pane `w` columns wide: a terminal cell is about twice as tall as it is wide
+const CELL_ASPECT = 0.5
+export function shotBox(width, height, w, maxRows = 48) {
+  const ratio = height / Math.max(1, width)
+  let columns = Math.max(1, Math.min(255, w))
+  let rows = Math.round(columns * ratio * CELL_ASPECT)
+  if (rows > maxRows) {
+    rows = maxRows
+    columns = Math.max(1, Math.round(rows / ratio / CELL_ASPECT))
+  }
+  return { columns, rows: Math.max(1, Math.min(255, rows)) }
 }

@@ -17,8 +17,9 @@ import { findDiagrams, parseMermaid, drawGraph, short } from './draw.js'
 import { adoptIds, allIds, applyOps, boxOf, carrySubs, cleanId, levelAt, setLevel, toMermaid, uniqueIds } from './graph.js'
 import {
   DIFF_MODES, TABS, W, plain, chatItems, declare, focusPane, progressItems, refreshHerdr, diffItems, githubItems, headItems, readContext, readMessages, refreshGh, refreshGit, refreshOverall,
-  hideTab, settleOwner, showHere, startPanelSession, updateChain,
+  hideTab, settleOwner, showHere, startPanelSession, updateChain, pickedShot, prepareShot, refreshShots, shotItems, shotPngPath,
 } from './panel.js'
+import { textHash } from './work.js'
 
 const PANE = 'diagrams'
 const TOOL_GET = 'mcp__diagram-pane__diagram_get'
@@ -78,7 +79,7 @@ export function register(on, options) {
     const fresh = W.interactive && (await $.session.messages()).length === 0
     await placePane($, { fresh, herdr: true })
     try {
-      await $.command.register({ name: 'diagram', description: 'Show or hide the work pane for this tab: map, progress, diffs, GitHub, chats', argumentHint: '[show|hide|force|open|map|progress|diffs|github|chats]' })
+      await $.command.register({ name: 'diagram', description: 'Show or hide the work pane for this tab: map, progress, diffs, GitHub, chats, screenshots', argumentHint: '[show|hide|force|open|map|progress|diffs|github|chats|shots]' })
     } catch (err) {
       $.ui.log('could not add /diagram: ' + err.message)
     }
@@ -110,6 +111,14 @@ export function register(on, options) {
     return result
   }).catch(($, e, next) => next(e))
 
+  // A screenshot a tool takes or reads shows while the turn goes on, in
+  // subagents too, when the shots tab is the one showing
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+    if (W.tab === 'shots') void refreshShots($).then(() => redraw($)).catch(() => {})
+    return result
+  }).catch(($, e, next) => next(e))
+
   // The tab's chain records how each chat ended
   on('session.end', async ($, e, next) => {
     try {
@@ -138,6 +147,7 @@ export function register(on, options) {
     const panel = (async () => {
       await readContext($)
       await refreshGit($)
+      await refreshShots($)
       await updateChain($, { turns: S.turn })
       await redraw($)
       await tick($)
@@ -151,7 +161,7 @@ export function register(on, options) {
   // from scratch; /diagram open gives the pane the keyboard, so number keys work
   on('command.run', { command: 'diagram' }, async ($, e) => {
     const arg = e.args.trim()
-    const tab = TABS.find(t => t.id === arg || (arg === 'diff' && t.id === 'diffs') || (arg === 'gh' && t.id === 'github'))
+    const tab = TABS.find(t => t.id === arg || (arg === 'diff' && t.id === 'diffs') || (arg === 'gh' && t.id === 'github') || (arg === 'screenshots' && t.id === 'shots'))
     // Bare /diagram toggles the pane for the whole tab; any other form shows it here
     // (open but undrawn, on a narrow terminal, counts as not shown)
     const shown = (await settleOwner($)).show && (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
@@ -224,11 +234,13 @@ export function register(on, options) {
 
   // The pane itself: lines of Text, rows of Buttons, and one Input
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Input, Code, Link } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Code, Link, Image } = $.ui.resolve(e)
     const items = paneItems(Math.max(30, e.props.bodyColumns || 60), actions($), await $.clock.now())
     return h(Box, { flexDirection: 'column' }, ...items.map(it => {
       if (it.input) return h(Input, it.input)
       if (it.code) return h(Code, { format: 'diff', source: it.code.source, path: it.code.path })
+      // Only the terminal draws pictures; elsewhere the shot is its words
+      if (it.image) return Image ? h(Image, it.image) : h(Text, { dimColor: true, wrap: 'wrap' }, textOnly(it.image.alt))
       if (it.link) return Link ? h(Link, { href: it.link.href, label: it.link.label }) : h(Text, { color: 'blue', wrap: 'truncate-end' }, it.link.label)
       if (it.buttons) {
         return h(Box, { flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, ...(it.indent ? { paddingLeft: it.indent } : {}) },
@@ -551,6 +563,23 @@ function actions($) {
     focusPane: async pane => {
       const err = await focusPane($, pane).catch(e => e.message)
       if (err) $.ui.toast('Could not jump to that pane: ' + err)
+    },
+    pickShot: async id => {
+      W.pickedShot = id
+      await redraw($)
+      await prepareShot($, pickedShot())
+      await redraw($)
+    },
+    // A file opens as it is; an inline shot opens as the PNG it was drawn from
+    openShot: async shot => {
+      const path = shot.kind === 'file' ? shot.path : await shotPngPath($, shot)
+      if (shot.kind !== 'file') await prepareShot($, shot)
+      const r = await $.process.run(['open', path], { timeoutMs: 15000 }).catch(err => ({ exitCode: 1, stderr: err.message }))
+      if (r.exitCode !== 0) $.ui.toast('Could not open it: ' + (r.stderr.trim() || `exit ${r.exitCode}`))
+    },
+    revealShot: async path => {
+      const r = await $.process.run(['open', '-R', path], { timeoutMs: 15000 }).catch(err => ({ exitCode: 1, stderr: err.message }))
+      if (r.exitCode !== 0) $.ui.toast('Could not show it in Finder: ' + (r.stderr.trim() || `exit ${r.exitCode}`))
     },
     copy: async text => {
       const r = await $.ui.copy({ text })
@@ -880,22 +909,17 @@ function nodeButtons(graph, act) {
 // follow you into another. A pin is named by its code, not its place in the
 // list, which shifts when a new diagram is pinned.
 function inputKey(view = S.view) {
-  return ['edit', view.root === 'pin' ? 'pin' + hash(view.code || '') : 'map', ...view.path].join('-')
+  return ['edit', view.root === 'pin' ? 'pin' + textHash(view.code || '') : 'map', ...view.path].join('-')
 }
 
-function hash(text) {
-  let h = 5381
-  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0
-  return h.toString(36)
-}
-
-// Items of { text, color, bold, dim }, { buttons, lead? } or { input }, cut to `w` columns
+// Items of { text, color, bold, dim }, { buttons, lead? }, { input }, { code }, { link } or { image }, cut to `w` columns
 function paneItems(w, act, now = Date.now()) {
   const head = headItems(w, act, S.map?.summary)
   if (W.tab === 'diffs') return [...head, ...diffItems(w, act, now)]
   if (W.tab === 'github') return [...head, ...githubItems(w, act, now)]
   if (W.tab === 'chats') return [...head, ...chatItems(w, act, now)]
   if (W.tab === 'progress') return [...head, ...progressItems(w, act)]
+  if (W.tab === 'shots') return [...head, ...shotItems(w, act, now)]
   return [...head, ...mapItems(w, act)]
 }
 
@@ -971,6 +995,7 @@ export function paneText(w = 60, now = Date.now()) {
     if (it.input) return `> ${it.input.placeholder}`
     if (it.code) return it.code.source
     if (it.link) return it.link.label
+    if (it.image) return `[image ${it.image.columns}×${it.image.rows}: ${it.image.alt}]`
     if (it.buttons) return [it.lead, ...it.buttons.map(b => (b.hotkey ? `${b.hotkey}: ${b.label}` : `[ ${b.label} ]`))].filter(Boolean).join('  ')
     return it.text
   }).join('\n')
@@ -999,6 +1024,7 @@ async function tick($, force = false) {
   if ((force && W.tab === 'github') || now >= W.ghDueAt) await refreshGh($)
   if (W.herdr === null || W.tab === 'chats') await refreshHerdr($)
   if (force && W.tab === 'chats') await updateChain($, { turns: S.turn })
+  if (W.tab === 'shots') await refreshShots($)
   await redraw($)
 }
 

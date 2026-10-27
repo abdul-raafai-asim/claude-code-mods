@@ -16,7 +16,7 @@ Claude sees the pane only through those two tools, plus `progress_set` for the p
 
 ### The other tabs
 
-The pane has five tabs: `m` map (everything above), `w` progress, `d` diffs, `g` github, `s` chats. Every tab starts with the same strip: branch, PR, CI, how many files changed, how full the context is. Under it is a line saying what this chat is for and where it stands. That line is written by the same fork that draws the map, so it costs nothing extra.
+The pane has six tabs: `m` map (everything above), `w` progress, `d` diffs, `g` github, `s` chats, `i` shots. Every tab starts with the same strip: branch, PR, CI, how many files changed, how full the context is. Under it is a line saying what this chat is for and where it stands. That line is written by the same fork that draws the map, so it costs nothing extra.
 
 - **Progress.** Where the work stands, as stages: plan → implement → test → review → fix → verify → commit → push → PR → CI → merge. Each stage shows `✓` done, `▶` now, `✗` failed, `–` skipped or `·` not yet, with the turn it happened in and what marked it. The stages come from what Claude ran, so they cost nothing to track:
   - `TodoWrite` or plan mode is plan, and file edits are implement;
@@ -34,6 +34,16 @@ The pane has five tabs: `m` map (everything above), `w` progress, `d` diffs, `g`
 - **Chats.** Under herdr, the list starts with every pane in this herdr tab that runs an agent, newest first. Each row shows the pane's state (`●` working, `!` needs you, `✓` finished but not yet seen, `○` idle) and its title, and `◀ here` marks your own pane. A number, or a click, jumps to that pane with `herdr agent focus`. herdr reports which Claude session each pane holds, so a pane whose chat ran this mod also shows that chat's summary, turns, context fill and handoff source. Below that are the earlier chats that no pane holds any more.
 
   Without herdr: every chat this terminal tab has held, newest first. A `/clear`, a handoff or a fresh `claude` in the same tab adds a row. Each row shows when the chat ran, its turns, how full its context got, how it ended, its branch and its summary. A chat that started from another's `HANDOFF-xxxxxxxx.md` note (as cache-clock writes them) is linked to that chat. Once there are two or more chats, a Haiku call writes one overall line for the whole chain. `copy resume command` copies `claude --resume <id>` for an older chat.
+
+- **Shots.** Every screenshot the chat has taken or looked at, newest first, so you never open Finder to see what a browser test saw. It picks up:
+  - images that came back inline from a tool, such as a Claude in Chrome or computer-use screenshot;
+  - image files (`.png`, `.jpg`, `.gif`, `.webp`) a tool named, in its input or its output: a Playwright or agent-browser screenshot it saved, a `Read` of a PNG, a path a script printed;
+  - the same in every subagent the chat ran, labelled with the subagent's task;
+  - images pasted into a prompt.
+
+  The newest is drawn in the pane until you pick another: a number picks one from the list, `n` / `p` step to the older or newer one. `o` opens it in Preview, `f` shows the file in Finder, and `copy path` copies it. The list updates after every tool call while the tab shows, so a browser test's screenshots appear as it takes them. Each shot is made a PNG of at most 1400 pixels a side with `sips` (kept under `~/.claude/diagram-pane/shots/`) and drawn with the terminal's picture support: Ghostty, kitty, or iTerm2 3.5+. A terminal that cannot draw pictures shows the shot's name instead, and `o` still opens it.
+
+  Under herdr, pictures need herdr 0.9.2 or later (earlier versions do not draw an app's kitty graphics) and `CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1`, since herdr names itself `libghostty` and Claude Code draws pictures only for terminals it knows. Set it for herdr panes alone, for example in `~/.zshrc`: `[ -n "$HERDR_ENV" ] && export CLAUDE_CODE_FORCE_TERMINAL_IMAGES=1`.
 
 "This tab" is the first of these that is set: `HERDR_TAB_ID`, `TMUX_PANE`, `ZELLIJ_PANE_ID`, `WEZTERM_PANE`, `KITTY_WINDOW_ID`, `ITERM_SESSION_ID`, `TERM_SESSION_ID`. With none of them set, the project folder stands in for the tab. A tab used for another project, or left idle for a day, starts a new chain. `-p` runs read the chain but are never added to it.
 
@@ -63,7 +73,7 @@ The pane opens on its own in a terminal 144 columns or wider. Narrower than that
 ## Usage
 
 - Ask for a diagram (`explain the checkout flow with a mermaid flowchart`) and it is pinned when the turn ends.
-- `/diagram diffs`, `/diagram github`, `/diagram chats`, `/diagram map` open the pane on that tab, with the keyboard.
+- `/diagram diffs`, `/diagram github`, `/diagram chats`, `/diagram shots`, `/diagram map` open the pane on that tab, with the keyboard.
 - `/diagram` shows the pane (hidden or in another chat) and runs the gate, redrawing the map if the work changed; when this chat already shows it, `/diagram` hides it for the tab. `/diagram force` skips the gate and draws the map from scratch, dropping edits.
 - `/diagram open` gives the pane the keyboard, so number keys work at once. Clicking the pane, or ctrl+x tab, does the same; Esc hands the keys back to the prompt.
 - Ask Claude to change what you are looking at: "add the NAT gateway to the network box", "move the cache under the API layer". It calls `diagram_get`, then `diagram_set`, and the pane shows the changed level.
@@ -104,6 +114,7 @@ The pane opens on its own in a terminal 144 columns or wider. Narrower than that
 - `/clear` starts the pane fresh: the old session's map, pins and view are dropped (its saved map stays under its own id for `--resume`), and a map or detail fork still running from before `/clear` is discarded.
 - The GitHub tab needs `gh` signed in. It reads only, as whichever account `gh` has active.
 - The diffs tab lists 80 files at most, and counts the lines of only the first 20 untracked files.
+- The shots tab keeps the 40 newest shots, needs macOS (`sips`, `open`), and finds a file only by a path with no spaces in it. An inline screenshot has no file time, so it counts as taken when the pane first saw it.
 - The map is the model's own summary of the work, so it can include a step such as "run tests" beside the files.
 
 ## Develop

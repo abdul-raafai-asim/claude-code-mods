@@ -7,10 +7,13 @@
 //   github  the branch's PR, its review state and CI checks, the latest runs
 //   chats   the sessions this terminal tab has held, oldest first, each with
 //           what it did; a /clear, a handoff or a new `claude` adds one
+//   shots   the screenshots this chat and its subagents took or read, newest
+//           first, the one picked drawn in the pane
 
 import { short } from './draw.js'
 import {
   STAGES, STATUS_MARK, ago, paneOwner, progressFrom, stageRows, changedFiles, ciWord, herdrPanes, hunksOf, lastCommitted, clock, handoffFrom, joinChain, leftCut, prWord, reviewWord, runState, splitDiff, tabIdFrom, tallyChecks,
+  agentsIn, shotBox, shotsIn, textHash, toolCaption,
 } from './work.js'
 
 export const TABS = [
@@ -19,6 +22,7 @@ export const TABS = [
   { id: 'diffs', hotkey: 'd', label: 'diffs' },
   { id: 'github', hotkey: 'g', label: 'github' },
   { id: 'chats', hotkey: 's', label: 'chats' },
+  { id: 'shots', hotkey: 'i', label: 'shots' },
 ]
 
 const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
@@ -46,7 +50,12 @@ export const W = {
   hidden: false,     // hidden outside herdr, where no tab record is kept
   msgs: [],          // the transcript as last read, for the progress tab
   declared: null,    // { input, seen }: the last progress_set, until the transcript holds it
-  busy: { git: false, gh: false, overall: false },
+  shots: [],         // the chat's screenshots, newest first: { id, kind, path?, media?, data?, tool, from, at }
+  pickedShot: null,  // the id of the shot the person picked; null follows the newest
+  shotViews: new Map(), // shot id -> { source, width, height } or { error }: what the Image draws
+  shotSeenAt: {},    // inline shot id -> when the pane first saw it, which orders it
+  shotsAgain: false, // a refresh was asked for while one ran
+  busy: { git: false, gh: false, overall: false, shots: false },
   ghDueAt: 0,
   gitDueAt: 0,
 }
@@ -54,7 +63,7 @@ export const W = {
 // A new session id (/clear): the tab's chain goes on, the session's own facts start over
 export function startPanelSession(id) {
   if (W.sessionId === id) return
-  Object.assign(W, { sessionId: id, touched: [], firstPrompt: '', openFile: null, ctx: null, msgs: [], declared: null })
+  Object.assign(W, { sessionId: id, touched: [], firstPrompt: '', openFile: null, ctx: null, msgs: [], declared: null, shots: [], pickedShot: null, shotSeenAt: {} })
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +548,141 @@ export async function readContext($) {
 }
 
 // ---------------------------------------------------------------------------
+// Screenshots: the shots tab
+// ---------------------------------------------------------------------------
+
+const MAX_SHOTS = 40
+const AGENT_DEPTH = 3
+// The longest side a shot is drawn from: sharp on a retina pane, small enough
+// to hand the terminal as bytes (at most 2 MiB), which herdr and tmux pass on
+const DRAW_SIDE = 1400
+const MAX_PNG_BYTES = 2 * 1024 * 1024
+
+async function homeDir($) {
+  return (await $.env.get('HOME')) || ''
+}
+
+// The main conversation's shots and every subagent's under it, oldest first
+async function collectShots($, agentId, from, depth, found) {
+  const rows = agentId ? await $.session.messages({ agentId }) : await $.session.messages()
+  if (!Array.isArray(rows)) return
+  const api = agentId ? await $.session.messages({ as: 'api', agentId }) : await $.session.messages({ as: 'api' })
+  const cwd = await $.session.cwd().catch(() => '')
+  const { files, inline } = shotsIn(rows, Array.isArray(api) ? api : [], { cwd, home: await homeDir($), from })
+  found.files.push(...files)
+  found.inline.push(...inline)
+  if (depth >= AGENT_DEPTH) return
+  for (const agent of agentsIn(rows)) {
+    await collectShots($, agent.id, agent.task, depth + 1, found).catch(() => {})
+  }
+}
+
+// Read the chat's screenshots again; files that are gone drop out
+export async function refreshShots($) {
+  if (W.busy.shots) {
+    W.shotsAgain = true
+    return
+  }
+  W.busy.shots = true
+  try {
+    const found = { files: [], inline: [] }
+    await collectShots($, undefined, 'main', 0, found)
+    const now = await $.clock.now()
+    const shots = []
+
+    // A file named again is one shot; its time is when it was last written
+    const lastMention = new Map()
+    for (const f of found.files) lastMention.set(f.path, f)
+    for (const f of lastMention.values()) {
+      const stat = await $.fs.stat(f.path).catch(() => null)
+      if (stat?.kind !== 'file') continue
+      shots.push({ ...f, id: 'f' + textHash(`${f.path}:${stat.mtimeMs}`), at: stat.mtimeMs })
+    }
+
+    // An inline image has no file time: it is as new as when the pane first saw it
+    const seen = new Set()
+    for (const shot of found.inline) {
+      if (seen.has(shot.id)) continue
+      seen.add(shot.id)
+      if (W.shotSeenAt[shot.id] === undefined) W.shotSeenAt[shot.id] = now
+      // Drawn once, its PNG is on disk: the base64 need not be kept
+      const data = W.shotViews.has(shot.id) ? undefined : shot.data
+      shots.push({ ...shot, data, at: W.shotSeenAt[shot.id] })
+    }
+
+    shots.sort((a, b) => b.at - a.at || b.order - a.order)
+    W.shots = shots.slice(0, MAX_SHOTS)
+    if (W.pickedShot && !W.shots.some(s => s.id === W.pickedShot)) W.pickedShot = null
+    if (W.tab === 'shots') await prepareShot($, pickedShot())
+  } finally {
+    W.busy.shots = false
+  }
+  if (W.shotsAgain) {
+    W.shotsAgain = false
+    await refreshShots($)
+  }
+}
+
+export function pickedShot() {
+  const picked = W.shots.find(s => s.id === W.pickedShot)
+  return picked || W.shots[0] || null
+}
+
+async function run($, argv) {
+  const r = await $.process.run(argv, { timeoutMs: 20000 })
+  if (r.exitCode !== 0) throw new Error(`${argv[0]}: ${(r.stderr || r.stdout).trim() || 'exit ' + r.exitCode}`)
+  return r.stdout
+}
+
+async function pixelSize($, path) {
+  const out = await run($, ['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', path])
+  const width = Number(out.match(/pixelWidth:\s*(\d+)/)?.[1])
+  const height = Number(out.match(/pixelHeight:\s*(\d+)/)?.[1])
+  if (!width || !height) throw new Error('could not read the picture\'s size')
+  return { width, height }
+}
+
+// Where a shot's drawable PNG is kept
+export async function shotPngPath($, shot) {
+  return `${await homeDir($)}/.claude/diagram-pane/shots/${shot.id}.png`
+}
+
+// Turn a shot into a PNG the terminal can draw (sips converts JPEG, GIF and
+// WebP, and scales a large one down), then read it as the Image's source
+export async function prepareShot($, shot) {
+  if (!shot || W.shotViews.has(shot.id)) return
+  try {
+    const png = await shotPngPath($, shot)
+    const dir = png.slice(0, png.lastIndexOf('/'))
+    if (!(await $.fs.exists(png))) {
+      await run($, ['mkdir', '-p', dir])
+      let input = shot.path
+      if (shot.kind === 'inline') {
+        if (!shot.data) throw new Error('the picture is no longer in the transcript')
+        const b64 = `${dir}/${shot.id}.b64`
+        input = `${dir}/${shot.id}.source`
+        await $.fs.write(b64, shot.data)
+        await run($, ['base64', '-D', '-i', b64, '-o', input])
+        await run($, ['rm', '-f', b64])
+      }
+      const size = await pixelSize($, input)
+      const scale = Math.max(size.width, size.height) > DRAW_SIDE ? ['-Z', String(DRAW_SIDE)] : []
+      await run($, ['sips', '-s', 'format', 'png', ...scale, input, '--out', png])
+      if (shot.kind === 'inline') await run($, ['rm', '-f', input])
+    }
+    const { width, height } = await pixelSize($, png)
+    const { base64 } = await $.fs.read(png, { as: 'bytes' })
+    const fitsAsBytes = (base64.length * 3) / 4 <= MAX_PNG_BYTES
+    const source = fitsAsBytes ? { png: base64 } : { file: png, format: 'png' }
+    W.shotViews.set(shot.id, { source, width, height })
+  } catch (err) {
+    W.shotViews.set(shot.id, { error: String(err.message || err) })
+  }
+  // Keep the last few drawn: each holds up to 2 MiB of base64
+  while (W.shotViews.size > 8) W.shotViews.delete(W.shotViews.keys().next().value)
+}
+
+// ---------------------------------------------------------------------------
 // What the pane draws
 // ---------------------------------------------------------------------------
 
@@ -781,5 +925,62 @@ export function chatItems(w, act, now) {
   add('')
   add('● working  ! needs you  ✓ finished, unseen  ○ idle', { dim: true })
   if (W.ctx !== null && W.ctx >= 80) add(`Context is ${W.ctx}% full: time to hand off soon.`, { color: 'yellow' })
+  return out
+}
+
+function shotName(shot) {
+  if (shot.kind === 'file') return shot.path.slice(shot.path.lastIndexOf('/') + 1)
+  if (shot.tool === 'pasted') return 'pasted image'
+  return `${toolCaption(shot.tool)} screenshot`
+}
+
+function shotWhere(shot, now) {
+  const by = shot.tool === 'pasted' ? 'pasted' : toolCaption(shot.tool)
+  const agent = shot.from === 'main' ? '' : ` · in subagent "${shot.from}"`
+  return `${by}${agent} · ${ago(shot.at, now)} ago`
+}
+
+export function shotItems(w, act, now) {
+  const out = []
+  const add = (text, style = {}) => out.push({ text, ...style })
+  const shots = W.shots
+  add(spread('◆ SCREENSHOTS IN THIS CHAT', shots.length ? `${shots.length} · newest first` : '', w), { bold: true, color: 'magenta' })
+  if (!shots.length) {
+    add('Screenshots Claude takes or reads show here: a browser tool\'s screenshot, an image file it saves or Reads, in this chat or its subagents, and images pasted into a prompt.', { dim: true, wrap: true })
+    return out
+  }
+
+  const shot = pickedShot()
+  const i = shots.indexOf(shot)
+  const picture = shot.kind === 'file' ? shot.path : null
+  add(short(`${i + 1}. ${shotName(shot)}`, w), { bold: true })
+  add(short(shotWhere(shot, now), w), { dim: true })
+  out.push({ buttons: [
+    ...(i > 0 ? [{ key: 'newer', hotkey: 'p', label: 'newer', onPress: () => act?.pickShot(shots[i - 1].id) }] : []),
+    ...(i < shots.length - 1 ? [{ key: 'older', hotkey: 'n', label: 'older', onPress: () => act?.pickShot(shots[i + 1].id) }] : []),
+    { key: 'preview', hotkey: 'o', label: 'open in Preview', onPress: () => act?.openShot(shot) },
+    ...(picture ? [{ key: 'finder', hotkey: 'f', label: 'show in Finder', onPress: () => act?.revealShot(picture) }] : []),
+    ...(picture ? [{ key: 'copy', label: 'copy path', onPress: () => act?.copy(picture) }] : []),
+  ] })
+
+  const view = W.shotViews.get(shot.id)
+  if (!view) add('… preparing the picture', { dim: true })
+  else if (view.error) add('Could not draw it: ' + view.error, { color: 'red', wrap: true })
+  else {
+    const box = shotBox(view.width, view.height, w)
+    const alt = `${shotName(shot)} (${view.width}×${view.height}): this terminal cannot draw pictures here, o opens it in Preview`
+    out.push({ image: { key: 'shot', source: view.source, columns: box.columns, rows: box.rows, alt } })
+  }
+  if (picture) add(short(picture, w), { dim: true })
+
+  add('─'.repeat(w), { dim: true })
+  shots.forEach((s, k) => {
+    const mark = s.id === shot.id ? '▶' : ' '
+    const label = `${k < 9 ? '' : '   '}${mark} ${short(shotName(s), Math.max(10, w - 22))} · ${ago(s.at, now)} ago`
+    out.push({ buttons: [{
+      key: 'shot:' + s.id, ...(k < 9 ? { hotkey: String(k + 1) } : {}), plain: true, label,
+      onPress: () => act?.pickShot(s.id),
+    }] })
+  })
   return out
 }

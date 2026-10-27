@@ -25,7 +25,7 @@ Answer `y` to add the marketplace, then pick a scope. Or add the marketplace onc
 | --- | --- |
 | [cache-clock](plugins/cache-clock) | A one-line band above the prompt: context used, and a countdown until the prompt cache goes cold. |
 | [decision-tree](plugins/decision-tree) | When Claude ends a reply with a question, explains the choice in a side pane and lets you explore any option, or your own, in a real forked session. |
-| [diagram-pane](plugins/diagram-pane) | A side pane that pins every diagram Claude draws and keeps a live map of the work, plus tabs for diffs, the PR and its CI, and every chat the terminal tab has held. |
+| [diagram-pane](plugins/diagram-pane) | A side pane that pins every diagram Claude draws and keeps a live map of the work, plus tabs for diffs, the PR and its CI, every chat the terminal tab has held, and the screenshots the chat took. |
 | [dream-pass](plugins/dream-pass) | A dreaming pass over Claude's memory folder: merges duplicates, rewrites stale entries, removes dead ones and tidies MEMORY.md, with a backup and undo. |
 | [jev-skill-suggestion](plugins/jev-skill-suggestion) | Scores every skill against your prompt with TypeSafe Jev as you type. Observe, block or steer which skill loads. |
 | [memory-fork](plugins/memory-fork) | Keeps auto-memory up to date in the background: after each turn Haiku decides whether memory needs a change, and a tool-less fork of the session drafts it. |
