@@ -1,19 +1,22 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { paneOwner } from '../hooks/work.js'
 
-// One pane per herdr tab: the chat that owns the tab's record shows it, the
-// others keep it closed, and hiding it hides it for the whole tab
+// One pane per herdr tab: once /diagram shows it (hidden: false), the chat that
+// owns the tab's record shows it, the others keep it closed, and hiding it hides
+// it for the whole tab
 
 const LIVE = [{ pane: 'wK:p1' }, { pane: 'wK:p2' }]
 
 test('the owner shows the pane, a new chat takes it over, a dead owner loses it', () => {
-  expect(paneOwner(null, 'wK:p1', null)).toEqual({ show: true, claim: true })
-  expect(paneOwner({ owner: 'wK:p1' }, 'wK:p1', null)).toEqual({ show: true, claim: false })
-  expect(paneOwner({ owner: 'wK:p1' }, 'wK:p2', LIVE)).toEqual({ show: false, claim: false })
+  // No /diagram yet: off, whoever owns the record
+  expect(paneOwner(null, 'wK:p1', null)).toEqual({ show: false, claim: true })
+  expect(paneOwner({ owner: 'wK:p1' }, 'wK:p1', null)).toEqual({ show: false, claim: false })
+  expect(paneOwner({ owner: 'wK:p1', hidden: false }, 'wK:p1', null)).toEqual({ show: true, claim: false })
+  expect(paneOwner({ owner: 'wK:p1', hidden: false }, 'wK:p2', LIVE)).toEqual({ show: false, claim: false })
   // herdr unknown: the owner is taken to be alive
-  expect(paneOwner({ owner: 'wK:p1' }, 'wK:p2', null)).toEqual({ show: false, claim: false })
-  expect(paneOwner({ owner: 'wK:p1' }, 'wK:p2', LIVE, { fresh: true })).toEqual({ show: true, claim: true })
-  expect(paneOwner({ owner: 'wK:p9' }, 'wK:p2', LIVE)).toEqual({ show: true, claim: true })
+  expect(paneOwner({ owner: 'wK:p1', hidden: false }, 'wK:p2', null)).toEqual({ show: false, claim: false })
+  expect(paneOwner({ owner: 'wK:p1', hidden: false }, 'wK:p2', LIVE, { fresh: true })).toEqual({ show: true, claim: true })
+  expect(paneOwner({ owner: 'wK:p9', hidden: false }, 'wK:p2', LIVE)).toEqual({ show: true, claim: true })
   // Hidden stays hidden for whoever owns it, a new chat included
   expect(paneOwner({ owner: 'wK:p1', hidden: true }, 'wK:p1', null)).toEqual({ show: false, claim: false })
   expect(paneOwner({ owner: 'wK:p1', hidden: true }, 'wK:p2', LIVE, { fresh: true })).toEqual({ show: false, claim: true })
@@ -47,7 +50,7 @@ function world(on: any, messages: unknown[] = [{ role: 'user', text: 'hi', toolU
 
 test('bare /diagram hides the pane for the tab, and again shows it here', async ($, on) => {
   const w = world(on)
-  w.files[FILE] = JSON.stringify({ owner: 'wK:p2' })
+  w.files[FILE] = JSON.stringify({ owner: 'wK:p2', hidden: false })
   await $.command.run({ command: 'diagram', args: '' } as never)
   expect(w.rec().hidden).toBe(true)
   expect(w.pane.up).toBe(false)
@@ -58,7 +61,7 @@ test('bare /diagram hides the pane for the tab, and again shows it here', async 
 
 test('a chat whose tab another pane owns keeps the pane closed, until /diagram claims it', async ($, on) => {
   const w = world(on)
-  w.files[FILE] = JSON.stringify({ owner: 'wK:p1' })
+  w.files[FILE] = JSON.stringify({ owner: 'wK:p1', hidden: false })
   await $.tool.call({ tool: 'mcp__diagram-pane__diagram_set', target: 'map', mermaid: 'flowchart TD\n  a[x.js]' } as never)
   expect(w.pane.up).toBe(false)
   await $.command.run({ command: 'diagram', args: 'diffs' } as never)
@@ -68,7 +71,7 @@ test('a chat whose tab another pane owns keeps the pane closed, until /diagram c
 
 test('/diagram hide, then a hidden tab stays hidden', async ($, on) => {
   const w = world(on)
-  w.files[FILE] = JSON.stringify({ owner: 'wK:p2' })
+  w.files[FILE] = JSON.stringify({ owner: 'wK:p2', hidden: false })
   await $.command.run({ command: 'diagram', args: 'hide' } as never)
   expect(w.pane.up).toBe(false)
   await $.tool.call({ tool: 'mcp__diagram-pane__diagram_set', target: 'map', mermaid: 'flowchart TD\n  a[x.js]' } as never)
@@ -79,7 +82,7 @@ test('/diagram hide, then a hidden tab stays hidden', async ($, on) => {
 
 test('in a narrow chat, where the pane waits undrawn, bare /diagram shows it', async ($, on) => {
   const w = world(on)
-  w.files[FILE] = JSON.stringify({ owner: 'wK:p2' })
+  w.files[FILE] = JSON.stringify({ owner: 'wK:p2', hidden: false })
   w.pane.placed = false
   await $.command.run({ command: 'diagram', args: '' } as never)
   expect(w.rec().hidden).toBe(false)
@@ -92,7 +95,7 @@ test('a slash command is not the chat\'s first prompt', async ($, on) => {
     { role: 'user', text: '<local-command-stdout>Reloaded</local-command-stdout>', toolUses: [] },
     { role: 'user', text: 'fix the login bug', toolUses: [] },
   ])
-  w.files[FILE] = JSON.stringify({ owner: 'wK:p2' })
+  w.files[FILE] = JSON.stringify({ owner: 'wK:p2', hidden: false })
   await $.command.run({ command: 'diagram', args: 'map' } as never)
   const ui = await $.ui.mount({ plugin: 'diagram-pane', surface: 'terminal', component: 'Pane', requestId: 'diagrams', props: { title: 'Diagrams', isFocused: true, bodyColumns: 70, placement: 'dock' } as never })
   expect(await ui.find({ type: 'Text', text: /started with: fix the login bug/ } as never)).toBeDefined()

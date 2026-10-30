@@ -64,9 +64,9 @@ claude plugin install diagram-pane@claude-code-mods
 
 Or inside Claude Code: `/plugin marketplace add abdul-raafai-asim/claude-code-mods`, then `/plugin install diagram-pane@claude-code-mods`.
 
-The pane opens on its own in a terminal 144 columns or wider. Narrower than that, type `/diagram` once and it opens at any width. With fullscreen rendering it docks beside the transcript; in the classic renderer it sits above the prompt.
+The pane stays off until you type `/diagram`; then it opens at any width. With fullscreen rendering it docks beside the transcript; in the classic renderer it sits above the prompt.
 
-**One pane per herdr tab.** Under herdr, only one chat in a tab shows the pane, however many chats the tab holds. A new chat in the tab, such as a handoff's, takes the pane over, and the chat it left closes its own. When the chat that shows it exits, the next chat to check (within 15 seconds) takes it. `/diagram` in any chat moves the pane there. The tab's record is `~/.claude/diagram-pane/tabs/<tab>.json`. Outside herdr each chat has a terminal pane of its own, so each shows its own.
+**One pane per herdr tab.** Under herdr, only one chat in a tab shows the pane, however many chats the tab holds. Once `/diagram` has shown it in a tab, a new chat there, such as a handoff's, takes the pane over, and the chat it left closes its own. When the chat that shows it exits, the next chat to check (within 15 seconds) takes it. `/diagram` in any chat moves the pane there. The tab's record is `~/.claude/diagram-pane/tabs/<tab>.json`. Outside herdr each chat has a terminal pane of its own, so each shows its own.
 
 **Show and hide.** A bare `/diagram` toggles the pane. Hiding is for the whole tab: the pane stays hidden in every chat in the tab, and in new ones, until you show it again. The `x hide` button in the pane's tab row, the pane's close mark and ctrl+x x hide it the same way. `/diagram hide` and `/diagram show` do one or the other.
 

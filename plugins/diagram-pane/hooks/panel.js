@@ -47,7 +47,7 @@ export const W = {
   tabFile: undefined,// the herdr tab's record of which pane shows the pane (null outside herdr)
   myPane: null,      // this chat's herdr pane
   paneOwner: null,   // the herdr pane that shows the tab's pane
-  hidden: false,     // hidden outside herdr, where no tab record is kept
+  hidden: true,      // hidden outside herdr, where no tab record is kept; off until /diagram
   msgs: [],          // the transcript as last read, for the progress tab
   declared: null,    // { input, seen }: the last progress_set, until the transcript holds it
   shots: [],         // the chat's screenshots, newest first: { id, kind, path?, media?, data?, tool, from, at }

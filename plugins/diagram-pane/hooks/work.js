@@ -439,7 +439,8 @@ export function paneOwner(rec, me, live, { fresh = false } = {}) {
   const owner = rec?.owner || null
   const alive = Boolean(owner) && (owner === me || !live || live.some(p => p.pane === owner))
   const mine = owner === me || fresh || !alive
-  return { show: mine && !rec?.hidden, claim: mine && owner !== me }
+  // Off until /diagram: only showHere writes hidden: false
+  return { show: mine && rec?.hidden === false, claim: mine && owner !== me }
 }
 
 // A short id for a piece of text (djb2, base 36)

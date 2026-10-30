@@ -25,7 +25,11 @@ function world(on: any, messages: () => unknown[] = () => [
   mock.env(on, {})
   mock.clock(on)
   on('session.id', () => ({ value: 's1' }))
-  on('ui.panes', () => ({ value: [{ id: 'diagrams', title: 'Diagrams', isPlaced: true }] }))
+  // The pane is off until /diagram: diagram_set alone never opens it
+  let up = false
+  on('ui.panes', () => ({ value: up ? [{ id: 'diagrams', title: 'Diagrams', isPlaced: true }] : [] }))
+  on('ui.open', () => ((up = true), { value: { isPlaced: true } }))
+  on('ui.close', () => ((up = false), { value: undefined }))
   on('session.messages', () => ({ value: messages() }))
 }
 

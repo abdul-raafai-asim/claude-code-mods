@@ -73,9 +73,8 @@ export function register(on, options) {
 
   on('session.start', async ($, e, next) => {
     W.interactive = e.isInteractive !== false
-    // Open the pane right away, unless another chat in this herdr tab shows it.
-    // A new chat (a handoff's) takes it over; a reload of this one does not.
-    // Unasked, it is placed on a wide terminal (144+ columns); /diagram opens it at any width.
+    // The pane stays off until /diagram. Once /diagram showed it in a herdr tab,
+    // a new chat there (a handoff's) takes it over; a reload of this one does not.
     const fresh = W.interactive && (await $.session.messages()).length === 0
     await placePane($, { fresh, herdr: true })
     try {

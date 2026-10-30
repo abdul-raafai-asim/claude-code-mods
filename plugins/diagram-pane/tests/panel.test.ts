@@ -105,7 +105,9 @@ function world(on: any, env: Record<string, string> = { HERDR_TAB_ID: 'wK:t1' })
     { role: 'assistant', text: 'done', toolUses: [{ tool: 'Edit', input: { file_path: '/repo/src/pay.js' } }] },
   ] }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 0, isLink: false } }))
-  on('fs.read', () => ({ value: 'a\nb\n' }))
+  // This tab's record says /diagram turned the pane on
+  on('fs.read', (_: any, e: any) => ({ value: e.path.includes('/diagram-pane/tabs/') ? JSON.stringify({ owner: 'wK:p1', hidden: false }) : 'a\nb\n' }))
+  on('fs.write', () => ({ value: undefined }))
   const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   const no = (stderr: string) => ({ value: { exitCode: 1, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } })
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -133,10 +135,14 @@ function world(on: any, env: Record<string, string> = { HERDR_TAB_ID: 'wK:t1' })
   })
 }
 
-const mount = ($: any) => $.ui.mount({
-  plugin: 'diagram-pane', surface: 'terminal', component: 'Pane', requestId: 'diagrams',
-  props: { title: 'Diagrams', isFocused: true, bodyColumns: 70, placement: 'dock' } as never,
-})
+// The person turns the pane on with /diagram, then looks at it
+async function mount($: any) {
+  await $.command.run({ command: 'diagram', args: 'show' } as never)
+  return $.ui.mount({
+    plugin: 'diagram-pane', surface: 'terminal', component: 'Pane', requestId: 'diagrams',
+    props: { title: 'Diagrams', isFocused: true, bodyColumns: 70, placement: 'dock' } as never,
+  })
+}
 
 const has = async (ui: any, text: RegExp) => expect(await ui.find({ type: 'Text', text } as never)).toBeDefined()
 
@@ -173,7 +179,7 @@ test('the github tab shows the PR, its review and the failing check', async ($, 
 })
 
 test('the chats tab lists the tab\'s herdr panes, and a number jumps to one', async ($, on) => {
-  world(on, { HERDR_ENV: '1', HERDR_TAB_ID: 'wK:t1', HERDR_PANE_ID: 'wK:p1', HERDR_WORKSPACE_ID: 'wK', HERDR_BIN_PATH: '/bin/herdr' })
+  world(on, { HERDR_ENV: '1', HERDR_TAB_ID: 'wK:t1', HERDR_PANE_ID: 'wK:p1', HERDR_WORKSPACE_ID: 'wK', HERDR_BIN_PATH: '/bin/herdr', HOME: '/home' })
   const ui = await mount($)
   await ui.press({ key: 'tab:chats' } as never)
   await has(ui, /CHATS IN THIS TAB/)
